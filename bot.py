@@ -3,7 +3,7 @@ import os
 import requests
 import pandas as pd
 import datetime
-import pytz  # Для часового пояса
+import pytz
 import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
@@ -18,243 +18,415 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
 # Файлы данных
 SUBSCRIBERS_FILE = "subscribers.txt"
 COMPANIES_FILE = "companies.txt"
+
+# Константы
+DATASET_ID = '544d4dad-0b6d-4972-b0b8-fb266829770f'
+RESOURCE_ID = 'deb76481-a6c8-4a45-ae6c-f02aa87e9f4a'
+BACKUP_URL = f'https://data.gov.ua/dataset/{DATASET_ID}/resource/{RESOURCE_ID}/download/vidomosti-pro-spravi-pro-bankrutstvo.csv'
+DAYS_TO_CHECK = 365  # Проверять банкротства за последний год
 
 # --- ФУНКЦИИ РАБОТЫ С ДАННЫМИ ---
 
 def get_monitored_codes():
     """Читает коды предприятий из внешнего файла."""
     if not os.path.exists(COMPANIES_FILE):
+        logger.warning(f"Файл {COMPANIES_FILE} не найден.")
         return []
-    with open(COMPANIES_FILE, 'r', encoding='utf-8') as f:
-        codes = [line.strip() for line in f if line.strip()]
-    return codes
+    
+    try:
+        with open(COMPANIES_FILE, 'r', encoding='utf-8') as f:
+            codes = [line.strip() for line in f if line.strip()]
+        logger.info(f"Загружено {len(codes)} кодов предприятий.")
+        return codes
+    except Exception as e:
+        logger.error(f"Ошибка чтения {COMPANIES_FILE}: {e}")
+        return []
+
 
 def get_subscribers():
     """Читает ID пользователей для рассылки."""
     if not os.path.exists(SUBSCRIBERS_FILE):
         return set()
-    with open(SUBSCRIBERS_FILE, 'r') as f:
-        return set(line.strip() for line in f if line.strip())
+    
+    try:
+        with open(SUBSCRIBERS_FILE, 'r') as f:
+            return set(line.strip() for line in f if line.strip())
+    except Exception as e:
+        logger.error(f"Ошибка чтения подписчиков: {e}")
+        return set()
+
 
 def add_subscriber(chat_id):
     """Добавляет пользователя в рассылку."""
     subs = get_subscribers()
-    if str(chat_id) not in subs:
-        with open(SUBSCRIBERS_FILE, 'a') as f:
-            f.write(f"{chat_id}\n")
-
-def check_bankruptcy_logic():
-    """Основная логика проверки (синхронная)."""
-    enterprise_codes = get_monitored_codes()
+    chat_id_str = str(chat_id)
     
-    if not enterprise_codes:
-        return "Список предприятий (companies.txt) пуст или не найден."
+    if chat_id_str not in subs:
+        try:
+            with open(SUBSCRIBERS_FILE, 'a') as f:
+                f.write(f"{chat_id_str}\n")
+            logger.info(f"Добавлен подписчик: {chat_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка добавления подписчика: {e}")
+            return False
+    return False
 
-    # Маскировка под обычный браузер (ОБЯЗАТЕЛЬНО для серверов)
+
+def remove_subscriber(chat_id):
+    """Удаляет пользователя из рассылки."""
+    subs = get_subscribers()
+    chat_id_str = str(chat_id)
+    
+    if chat_id_str in subs:
+        try:
+            subs.remove(chat_id_str)
+            with open(SUBSCRIBERS_FILE, 'w') as f:
+                for sub in subs:
+                    f.write(f"{sub}\n")
+            logger.info(f"Удален подписчик: {chat_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка удаления подписчика: {e}")
+            return False
+    return False
+
+
+def get_resource_url():
+    """Получает актуальную ссылку на CSV файл."""
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
     }
-
-    # 1. Получение ссылки
-    dataset_id = '544d4dad-0b6d-4972-b0b8-fb266829770f'
-    package_show_url = f'https://data.gov.ua/api/3/action/package_show?id={dataset_id}'
-    resource_url = None
     
-    # Попытка 1: Через API
+    # Попытка через API
     try:
-        logging.info("Попытка получения URL через API...")
+        package_show_url = f'https://data.gov.ua/api/3/action/package_show?id={DATASET_ID}'
+        logger.info("Получение URL через API...")
+        
         response = requests.get(package_show_url, headers=headers, timeout=15)
-        data_json = response.json()
-        if data_json.get('success'):
-            # Ищем ресурс с форматом CSV или последний добавленный
-            resources = data_json['result']['resources']
-            if resources:
-                resource_url = resources[-1]['url']
-                logging.info(f"URL получен через API: {resource_url}")
-    except Exception as e:
-        logging.warning(f"API недоступен, пробую прямую ссылку: {e}")
-
-    # Попытка 2: Если API не сработал, используем "вечную" прямую ссылку
-    if not resource_url:
-        # Это прямая ссылка на ресурс, которая часто остается неизменной
-        resource_url = 'https://data.gov.ua/dataset/544d4dad-0b6d-4972-b0b8-fb266829770f/resource/deb76481-a6c8-4a45-ae6c-f02aa87e9f4a/download/vidomosti-pro-spravi-pro-bankrutstvo.csv'
-        logging.info("Используется резервная прямая ссылка.")
-
-    # 2. Скачивание
-    local_filename = "bankruptcy_temp.csv"
-    try:
-        logging.info(f"Начинаю скачивание файла по адресу: {resource_url}")
-        # verify=False иногда нужен, если у госсайтов просрочены SSL сертификаты (бывает часто)
-        response = requests.get(resource_url, headers=headers, stream=True, timeout=120, verify=False)
         response.raise_for_status()
         
-        with open(local_filename, "wb") as f:
+        data_json = response.json()
+        if data_json.get('success'):
+            resources = data_json['result']['resources']
+            if resources:
+                url = resources[-1]['url']
+                logger.info(f"URL получен через API: {url}")
+                return url
+    except Exception as e:
+        logger.warning(f"API недоступен: {e}")
+    
+    # Резервная ссылка
+    logger.info("Используется резервная ссылка.")
+    return BACKUP_URL
+
+
+def download_csv(url, filename="bankruptcy_temp.csv"):
+    """Скачивает CSV файл."""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }
+    
+    try:
+        logger.info(f"Скачивание файла: {url}")
+        response = requests.get(
+            url, 
+            headers=headers, 
+            stream=True, 
+            timeout=120,
+            verify=True  # БЕЗОПАСНО: проверяем SSL
+        )
+        response.raise_for_status()
+        
+        with open(filename, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
-        logging.info("Файл успешно скачан.")
-    except Exception as e:
-        logging.error(f"Критическая ошибка скачивания: {e}")
-        return f"Не удалось скачать файл реестра. Ошибка: {str(e)[:100]}"
-
-    # 3. Чтение
-    data_df = None
-    # Пробуем разные кодировки, так как госсайты часто меняют их
-    for encoding in ["utf-8", "cp1251", "windows-1251", "latin-1"]:
+        
+        logger.info("Файл успешно скачан.")
+        return True
+        
+    except requests.exceptions.SSLError:
+        # Только если есть проблемы с SSL, пробуем без проверки
+        logger.warning("SSL ошибка, повторная попытка без проверки...")
         try:
-            data_df = pd.read_csv(
-                local_filename,
+            response = requests.get(url, headers=headers, stream=True, timeout=120, verify=False)
+            response.raise_for_status()
+            
+            with open(filename, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            return True
+        except Exception as e:
+            logger.error(f"Критическая ошибка скачивания: {e}")
+            return False
+    except Exception as e:
+        logger.error(f"Ошибка скачивания: {e}")
+        return False
+
+
+def read_csv(filename):
+    """Читает CSV файл с автоопределением кодировки."""
+    encodings = ["utf-8", "cp1251", "windows-1251", "latin-1"]
+    
+    for encoding in encodings:
+        try:
+            df = pd.read_csv(
+                filename,
                 sep=None,
                 engine="python",
                 on_bad_lines="skip",
                 encoding=encoding
             )
-            logging.info(f"CSV прочитан с кодировкой: {encoding}")
-            break
-        except Exception:
+            logger.info(f"CSV прочитан с кодировкой: {encoding}")
+            return df
+        except Exception as e:
+            logger.debug(f"Не удалось прочитать с {encoding}: {e}")
             continue
     
-    if data_df is None:
-        return "Ошибка: не удалось подобрать кодировку файла."
+    logger.error("Не удалось подобрать кодировку.")
+    return None
 
-    # Очистка
-    data_df.columns = data_df.columns.str.strip()
+
+def find_column(df, keywords):
+    """Ищет колонку по ключевым словам."""
+    for col in df.columns:
+        if any(keyword in col.lower() for keyword in keywords):
+            return col
+    return None
+
+
+def parse_date(date_str):
+    """Парсит дату из строки."""
+    if pd.isna(date_str) or str(date_str).lower() == 'nan':
+        return None
     
-    # Поиск нужной колонки (иногда названия меняются, ищем ту, где есть 'код' или 'edrpou')
-    edrpou_col = None
-    for col in data_df.columns:
-        if 'код' in col.lower() or 'edrpou' in col.lower() or 'єдрпоу' in col.lower():
-            edrpou_col = col
-            break
+    date_str = str(date_str).strip().split()[0]
     
-    if not edrpou_col:
-         # Если не нашли умным поиском, пробуем стандартное имя, если оно есть
-         if 'firm_edrpou' in data_df.columns:
-             edrpou_col = 'firm_edrpou'
-         else:
-             return f"Ошибка структуры файла: не найдена колонка с кодом ЕГРПОУ. Доступные колонки: {list(data_df.columns)}"
-         
-    # Приводим к строке и чистим
-    data_df['clean_code'] = data_df[edrpou_col].astype(str).str.strip()
-    
-    # Ищем колонку с названием
-    name_col = next((col for col in data_df.columns if 'назва' in col.lower() or 'name' in col.lower()), data_df.columns[1])
-    # Ищем колонку с датой
-    date_col = next((col for col in data_df.columns if 'дата' in col.lower() or 'date' in col.lower()), None)
+    try:
+        return datetime.datetime.strptime(date_str, "%d.%m.%Y").date()
+    except ValueError:
+        return None
 
-    if not date_col:
-        return "Ошибка структуры: не найдена колонка с датой."
 
-    # 4. Поиск
-    date_threshold = datetime.datetime.strptime("01.01.2025", "%d.%m.%Y").date()
-    results = []
-
-    for code in enterprise_codes:
-        info = data_df[data_df['clean_code'] == code]
-        if not info.empty:
-            # Берем последнюю запись
-            row = info.iloc[0]
-            full_name = str(row[name_col])
-            date_str = str(row[date_col])
+def check_bankruptcy_logic():
+    """Основная логика проверки банкротств."""
+    try:
+        # 1. Получение списка кодов
+        enterprise_codes = get_monitored_codes()
+        if not enterprise_codes:
+            return "⚠️ Список предприятий (companies.txt) пуст или не найден."
+        
+        # 2. Получение URL и скачивание
+        resource_url = get_resource_url()
+        local_filename = "bankruptcy_temp.csv"
+        
+        if not download_csv(resource_url, local_filename):
+            return "❌ Не удалось скачать файл реестра. Проверьте подключение к интернету."
+        
+        # 3. Чтение CSV
+        data_df = read_csv(local_filename)
+        if data_df is None:
+            return "❌ Ошибка: не удалось прочитать файл реестра."
+        
+        # Очистка названий колонок
+        data_df.columns = data_df.columns.str.strip()
+        
+        # 4. Поиск нужных колонок
+        edrpou_col = find_column(data_df, ['код', 'edrpou', 'єдрпоу'])
+        if not edrpou_col:
+            if 'firm_edrpou' in data_df.columns:
+                edrpou_col = 'firm_edrpou'
+            else:
+                return f"❌ Не найдена колонка с кодом ЄДРПОУ.\nДоступные: {', '.join(data_df.columns[:5])}..."
+        
+        name_col = find_column(data_df, ['назва', 'name', 'найменування'])
+        if not name_col:
+            name_col = data_df.columns[1]  # Берем вторую колонку
+        
+        date_col = find_column(data_df, ['дата', 'date'])
+        if not date_col:
+            return "❌ Не найдена колонка с датой."
+        
+        # 5. Подготовка данных
+        data_df['clean_code'] = data_df[edrpou_col].astype(str).str.strip()
+        
+        # Динамическая дата порога (N дней назад)
+        date_threshold = datetime.date.today() - datetime.timedelta(days=DAYS_TO_CHECK)
+        
+        # 6. Поиск совпадений
+        results = []
+        for code in enterprise_codes:
+            matches = data_df[data_df['clean_code'] == code]
             
-            if pd.isna(date_str) or date_str.lower() == 'nan':
-                continue
-            
-            date_str = date_str.strip()
-            try:
-                # Пытаемся парсить дату (иногда бывает формат с временем)
-                clean_date_str = date_str.split()[0] 
-                date_obj = datetime.datetime.strptime(clean_date_str, "%d.%m.%Y").date()
+            if not matches.empty:
+                row = matches.iloc[0]
+                full_name = str(row[name_col])
+                date_obj = parse_date(row[date_col])
                 
-                if date_obj > date_threshold:
+                if date_obj and date_obj > date_threshold:
                     results.append({
                         "code": code,
                         "name": full_name,
-                        "date": clean_date_str,
+                        "date": date_obj.strftime("%d.%m.%Y"),
                         "date_obj": date_obj
                     })
-            except ValueError:
-                continue
+        
+        # Очистка
+        if os.path.exists(local_filename):
+            os.remove(local_filename)
+        
+        # 7. Формирование отчета
+        if not results:
+            return f"✅ В списке мониторинга новых банкротов не найдено\n(проверка за последние {DAYS_TO_CHECK} дней)."
+        
+        results.sort(key=lambda x: x["date_obj"], reverse=True)
+        
+        message = f"⚠️ <b>НАЙДЕНЫ БАНКРОТЫ ({len(results)})</b>\n\n"
+        for i, entry in enumerate(results, 1):
+            message += (
+                f"{i}. <b>Код:</b> {entry['code']}\n"
+                f"🏢 <b>Компания:</b> {entry['name']}\n"
+                f"📅 <b>Дата:</b> {entry['date']}\n"
+                f"{'─' * 30}\n"
+            )
+        
+        return message
+        
+    except Exception as e:
+        logger.error(f"Критическая ошибка в check_bankruptcy_logic: {e}", exc_info=True)
+        return f"❌ Произошла ошибка при проверке: {str(e)[:200]}"
 
-    if os.path.exists(local_filename):
-        os.remove(local_filename)
-
-    results.sort(key=lambda x: x["date_obj"])
-
-    if not results:
-        return "✅ В списке мониторинга новых банкротов не найдено."
-
-    message = f"⚠️ <b>НАЙДЕНЫ БАНКРОТЫ ({len(results)}):</b>\n\n"
-    for i, entry in enumerate(results, 1):
-        message += (
-            f"{i}. <b>Код:</b> {entry['code']}\n"
-            f"🏢 <b>Компания:</b> {entry['name']}\n"
-            f"📅 <b>Дата:</b> {entry['date']}\n"
-            f"_____________________\n"
-        )
-    return message
 
 # --- ОБРАБОТЧИКИ БОТА ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /start"""
     chat_id = update.effective_chat.id
-    add_subscriber(chat_id)
-    await update.message.reply_text(
-        f"Привет! Я добавил этот чат ({chat_id}) в список рассылки.\n"
-        "Я буду проверять реестр банкротов каждое утро в 09:00 (по Киеву).\n"
-        "Чтобы проверить прямо сейчас, нажми /check"
+    is_new = add_subscriber(chat_id)
+    
+    if is_new:
+        message = (
+            f"👋 Привет! Ты подписан на рассылку.\n\n"
+            f"🔔 Я буду проверять реестр банкротов каждое утро в 09:00 (Киев).\n\n"
+            f"Доступные команды:\n"
+            f"/check - проверить прямо сейчас\n"
+            f"/stop - отписаться от рассылки\n"
+            f"/help - показать справку"
+        )
+    else:
+        message = "Ты уже подписан! Используй /check для ручной проверки."
+    
+    await update.message.reply_text(message)
+
+
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /stop - отписка"""
+    chat_id = update.effective_chat.id
+    
+    if remove_subscriber(chat_id):
+        await update.message.reply_text(
+            "👋 Ты отписан от рассылки.\n"
+            "Чтобы подписаться снова, используй /start"
+        )
+    else:
+        await update.message.reply_text("Ты и так не подписан на рассылку.")
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /help"""
+    message = (
+        "📖 <b>Справка по боту</b>\n\n"
+        "Этот бот мониторит реестр банкротств Украины.\n\n"
+        "<b>Команды:</b>\n"
+        "/start - подписаться на рассылку\n"
+        "/check - проверить сейчас\n"
+        "/stop - отписаться\n"
+        "/help - эта справка\n\n"
+        f"⏰ Автоматическая проверка: каждый день в 09:00\n"
+        f"📊 Проверяются банкротства за последние {DAYS_TO_CHECK} дней"
     )
+    await update.message.reply_text(message, parse_mode='HTML')
+
 
 async def manual_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ручной запуск."""
-    await update.message.reply_text("⏳ Начинаю проверку реестра... Это может занять минуту.")
-    # Запускаем тяжелую задачу в отдельном потоке, чтобы бот не завис
-    report = await asyncio.to_thread(check_bankruptcy_logic)
-    await update.message.reply_text(report, parse_mode='HTML')
+    """Команда /check - ручная проверка"""
+    try:
+        await update.message.reply_text("⏳ Начинаю проверку реестра... Это может занять минуту.")
+        
+        # Запускаем в отдельном потоке
+        report = await asyncio.to_thread(check_bankruptcy_logic)
+        
+        await update.message.reply_text(report, parse_mode='HTML')
+        
+    except Exception as e:
+        logger.error(f"Ошибка в manual_check: {e}", exc_info=True)
+        await update.message.reply_text(
+            "❌ Произошла ошибка при проверке. Попробуйте позже."
+        )
+
 
 async def scheduled_check(context: ContextTypes.DEFAULT_TYPE):
-    """Автоматический запуск (JobQueue)."""
+    """Автоматическая проверка по расписанию"""
     subscribers = get_subscribers()
+    
     if not subscribers:
-        logging.warning("Нет подписчиков для рассылки.")
+        logger.warning("Нет подписчиков для рассылки.")
         return
+    
+    logger.info(f"Запуск проверки по расписанию для {len(subscribers)} подписчиков...")
+    
+    try:
+        report = await asyncio.to_thread(check_bankruptcy_logic)
+        
+        success_count = 0
+        for chat_id in subscribers:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=report,
+                    parse_mode='HTML'
+                )
+                success_count += 1
+            except Exception as e:
+                logger.error(f"Не удалось отправить сообщение {chat_id}: {e}")
+        
+        logger.info(f"Рассылка завершена: успешно {success_count}/{len(subscribers)}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка в scheduled_check: {e}", exc_info=True)
 
-    logging.info("Запуск проверки по расписанию...")
-    report = await asyncio.to_thread(check_bankruptcy_logic)
-
-    for chat_id in subscribers:
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=report, parse_mode='HTML')
-        except Exception as e:
-            logging.error(f"Не удалось отправить сообщение пользователю {chat_id}: {e}")
 
 # --- ЗАПУСК ---
 
 if __name__ == '__main__':
     if not TOKEN:
-        print("Ошибка: Не задан BOT_TOKEN в файле .env")
-        exit()
-
+        print("❌ Ошибка: Не задан BOT_TOKEN в файле .env")
+        exit(1)
+    
     # Создаем приложение
     application = ApplicationBuilder().token(TOKEN).build()
-
-    # --- НАСТРОЙКА ПЛАНИРОВЩИКА (ВСТРОЕННОГО) ---
-    job_queue = application.job_queue
     
-    # Указываем часовой пояс (Киев)
+    # Настройка планировщика
+    job_queue = application.job_queue
     kyiv_tz = pytz.timezone('Europe/Kiev')
     target_time = datetime.time(hour=9, minute=0, tzinfo=kyiv_tz)
     
-    # Добавляем задачу: запускать scheduled_check каждый день в 09:00
+    # Добавляем задачу
     job_queue.run_daily(scheduled_check, time=target_time)
-
-    # --- ХЕНДЛЕРЫ ---
+    
+    # Регистрация команд
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stop", stop))
     application.add_handler(CommandHandler("check", manual_check))
-
-    print("Бот запущен...")
+    application.add_handler(CommandHandler("help", help_command))
+    
+    logger.info("🤖 Бот запущен и готов к работе!")
+    logger.info(f"📅 Автоматическая проверка: каждый день в {target_time.hour:02d}:{target_time.minute:02d}")
+    
     application.run_polling()
