@@ -41,8 +41,20 @@ def get_monitored_codes():
     try:
         with open(COMPANIES_FILE, 'r', encoding='utf-8') as f:
             codes = [line.strip() for line in f if line.strip()]
-        logger.info(f"Загружено {len(codes)} кодов предприятий.")
-        return codes
+        
+        # Убираем дубликаты, сохраняя порядок
+        unique_codes = []
+        seen = set()
+        for code in codes:
+            if code not in seen:
+                unique_codes.append(code)
+                seen.add(code)
+        
+        if len(codes) != len(unique_codes):
+            logger.info(f"Удалено {len(codes) - len(unique_codes)} дубликатов из списка кодов.")
+        
+        logger.info(f"Загружено {len(unique_codes)} уникальных кодов предприятий.")
+        return unique_codes
     except Exception as e:
         logger.error(f"Ошибка чтения {COMPANIES_FILE}: {e}")
         return []
@@ -172,7 +184,8 @@ def download_csv(url, filename="bankruptcy_temp.csv"):
 
 def read_csv(filename):
     """Читает CSV файл с автоопределением кодировки."""
-    encodings = ["utf-8", "cp1251", "windows-1251", "latin-1"]
+    # Порядок важен: сначала пробуем украинские кодировки
+    encodings = ["cp1251", "windows-1251", "utf-8", "utf-8-sig", "latin-1"]
     
     for encoding in encodings:
         try:
@@ -181,10 +194,16 @@ def read_csv(filename):
                 sep=None,
                 engine="python",
                 on_bad_lines="skip",
-                encoding=encoding
+                encoding=encoding,
+                encoding_errors='replace'  # Заменяем проблемные символы
             )
-            logger.info(f"CSV прочитан с кодировкой: {encoding}")
-            return df
+            
+            # Проверяем, что кодировка правильная (нет "крякозябр")
+            test_text = str(df.iloc[0, 0]) if len(df) > 0 else ""
+            if '�' not in test_text or encoding == encodings[-1]:
+                logger.info(f"CSV прочитан с кодировкой: {encoding}")
+                return df
+                
         except Exception as e:
             logger.debug(f"Не удалось прочитать с {encoding}: {e}")
             continue
@@ -261,12 +280,35 @@ def check_bankruptcy_logic():
         
         # 6. Поиск совпадений
         results = []
+        seen_codes = set()  # Для отслеживания уже добавленных кодов
+        
         for code in enterprise_codes:
+            # Пропускаем, если код уже обработан
+            if code in seen_codes:
+                continue
+                
             matches = data_df[data_df['clean_code'] == code]
             
             if not matches.empty:
+                # Берем только первую (самую свежую) запись для каждого кода
                 row = matches.iloc[0]
                 full_name = str(row[name_col])
+                
+                # Пытаемся исправить кодировку названия, если она битая
+                try:
+                    # Если название выглядит как latin-1, но на самом деле cp1251
+                    if any(ord(c) > 127 for c in full_name):
+                        # Пробуем перекодировать
+                        try:
+                            full_name = full_name.encode('latin-1').decode('cp1251')
+                        except:
+                            try:
+                                full_name = full_name.encode('cp1252').decode('cp1251')
+                            except:
+                                pass  # Оставляем как есть
+                except:
+                    pass  # Оставляем оригинальное название
+                
                 date_obj = parse_date(row[date_col])
                 
                 if date_obj and date_obj > date_threshold:
@@ -276,6 +318,7 @@ def check_bankruptcy_logic():
                         "date": date_obj.strftime("%d.%m.%Y"),
                         "date_obj": date_obj
                     })
+                    seen_codes.add(code)  # Помечаем код как обработанный
         
         # Очистка
         if os.path.exists(local_filename):
@@ -361,6 +404,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start - подписаться на рассылку\n"
         "/check - проверить сейчас\n"
         "/stop - отписаться\n"
+        "/cleandup - удалить дубликаты из списка\n"
         "/debug - диагностика (проверка настроек)\n"
         "/help - эта справка\n\n"
         f"⏰ Автоматическая проверка: каждый день в 09:00\n"
@@ -378,6 +422,13 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         codes = get_monitored_codes()
         subs = get_subscribers()
+        
+        # Проверяем дубликаты в исходном файле
+        duplicates_count = 0
+        if companies_exist:
+            with open(COMPANIES_FILE, 'r', encoding='utf-8') as f:
+                all_codes = [line.strip() for line in f if line.strip()]
+                duplicates_count = len(all_codes) - len(set(all_codes))
         
         # Проверка интернета
         try:
@@ -400,8 +451,14 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = (
             "🔍 <b>ДИАГНОСТИКА БОТА</b>\n\n"
             f"📁 Файл companies.txt: {'✅ Существует' if companies_exist else '❌ Не найден'}\n"
-            f"   Загружено кодов: <b>{len(codes)}</b>\n"
-            f"   Коды: {', '.join(codes[:5])}{' ...' if len(codes) > 5 else ''}\n\n"
+            f"   Уникальных кодов: <b>{len(codes)}</b>\n"
+        )
+        
+        if duplicates_count > 0:
+            message += f"   ⚠️ Найдено дубликатов: <b>{duplicates_count}</b>\n"
+        
+        message += f"   Коды: {', '.join(codes[:5])}{' ...' if len(codes) > 5 else ''}\n\n"
+        message += (
             f"📁 Файл subscribers.txt: {'✅ Существует' if subscribers_exist else '❌ Не найден'}\n"
             f"   Подписчиков: <b>{len(subs)}</b>\n\n"
             f"🌐 Доступ к data.gov.ua: {internet_status}\n\n"
@@ -412,6 +469,9 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not codes:
             message += "⚠️ <b>ВНИМАНИЕ:</b> Файл companies.txt пуст!\n"
             message += "Создайте файл и добавьте коды ЄДРПОУ (по одному на строку).\n\n"
+        
+        if duplicates_count > 0:
+            message += f"⚠️ В файле {duplicates_count} дубликатов. Используйте /cleandup для очистки.\n\n"
         
         if not internet_ok:
             message += "⚠️ <b>ВНИМАНИЕ:</b> Нет доступа к data.gov.ua!\n"
@@ -425,6 +485,63 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка в debug_command: {e}", exc_info=True)
         await update.message.reply_text(
             f"❌ Ошибка диагностики:\n<code>{str(e)}</code>",
+            parse_mode='HTML'
+        )
+
+
+async def cleandup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /cleandup - удаление дубликатов из companies.txt"""
+    try:
+        if not os.path.exists(COMPANIES_FILE):
+            await update.message.reply_text("❌ Файл companies.txt не найден.")
+            return
+        
+        # Читаем все коды
+        with open(COMPANIES_FILE, 'r', encoding='utf-8') as f:
+            all_codes = [line.strip() for line in f if line.strip()]
+        
+        original_count = len(all_codes)
+        
+        # Убираем дубликаты
+        unique_codes = []
+        seen = set()
+        for code in all_codes:
+            if code not in seen:
+                unique_codes.append(code)
+                seen.add(code)
+        
+        duplicates_removed = original_count - len(unique_codes)
+        
+        if duplicates_removed == 0:
+            await update.message.reply_text("✅ Дубликатов не найдено, файл чистый!")
+            return
+        
+        # Создаем бэкап
+        backup_file = f"{COMPANIES_FILE}.backup"
+        with open(backup_file, 'w', encoding='utf-8') as f:
+            for code in all_codes:
+                f.write(f"{code}\n")
+        
+        # Записываем очищенный список
+        with open(COMPANIES_FILE, 'w', encoding='utf-8') as f:
+            for code in unique_codes:
+                f.write(f"{code}\n")
+        
+        message = (
+            f"✅ Очистка завершена!\n\n"
+            f"Было кодов: <b>{original_count}</b>\n"
+            f"Удалено дубликатов: <b>{duplicates_removed}</b>\n"
+            f"Осталось: <b>{len(unique_codes)}</b>\n\n"
+            f"Резервная копия сохранена: {backup_file}"
+        )
+        
+        await update.message.reply_text(message, parse_mode='HTML')
+        logger.info(f"Удалено {duplicates_removed} дубликатов из {COMPANIES_FILE}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка в cleandup_command: {e}", exc_info=True)
+        await update.message.reply_text(
+            f"❌ Ошибка при очистке:\n<code>{str(e)}</code>",
             parse_mode='HTML'
         )
 
@@ -558,6 +675,7 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("check", manual_check))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("debug", debug_command))
+    application.add_handler(CommandHandler("cleandup", cleandup_command))
     
     logger.info("🤖 Бот запущен и готов к работе!")
     logger.info(f"📅 Автоматическая проверка: каждый день в {target_time.hour:02d}:{target_time.minute:02d}")
