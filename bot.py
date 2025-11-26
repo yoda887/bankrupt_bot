@@ -185,7 +185,7 @@ def download_csv(url, filename="bankruptcy_temp.csv"):
 def read_csv(filename):
     """Читает CSV файл с автоопределением кодировки."""
     # Порядок важен: сначала пробуем украинские кодировки
-    encodings = ["cp1251", "windows-1251", "utf-8", "utf-8-sig", "latin-1"]
+    encodings = ["utf-8", "cp1251", "windows-1251", "utf-8-sig", "latin-1"]
     
     for encoding in encodings:
         try:
