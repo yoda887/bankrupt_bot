@@ -5,6 +5,7 @@ import pandas as pd
 import datetime
 import pytz
 import asyncio
+import json
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 from dotenv import load_dotenv
@@ -23,12 +24,34 @@ logger = logging.getLogger(__name__)
 # Файлы данных
 SUBSCRIBERS_FILE = "subscribers.txt"
 COMPANIES_FILE = "companies.txt"
+HISTORY_FILE = "history.json"
 
 # Константы
 DATASET_ID = '544d4dad-0b6d-4972-b0b8-fb266829770f'
 RESOURCE_ID = 'deb76481-a6c8-4a45-ae6c-f02aa87e9f4a'
 BACKUP_URL = f'https://data.gov.ua/dataset/{DATASET_ID}/resource/{RESOURCE_ID}/download/vidomosti-pro-spravi-pro-bankrutstvo.csv'
-DAYS_TO_CHECK = 365  # Проверять банкротства за последний год
+DAYS_TO_CHECK = 2  # Проверять банкротства за последний год
+
+# --- ФУНКЦИИ РАБОТЫ С ИСТОРИЕЙ (НОВОЕ) ---
+
+def load_history():
+    """Загружает список уже просмотренных банкротств."""
+    if not os.path.exists(HISTORY_FILE):
+        return []
+    try:
+        with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Ошибка чтения истории: {e}")
+        return []
+
+def save_history(history_list):
+    """Сохраняет обновленную историю."""
+    try:
+        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(history_list, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        logger.error(f"Ошибка записи истории: {e}")
 
 # --- ФУНКЦИИ РАБОТЫ С ДАННЫМИ ---
 
@@ -359,7 +382,7 @@ def check_bankruptcy_logic():
         logger.error(f"Критическая ошибка в check_bankruptcy_logic: {e}", exc_info=True)
         return f"❌ Произошла ошибка при проверке: {str(e)[:200]}"
 
-
+        
 # --- ОБРАБОТЧИКИ БОТА ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
