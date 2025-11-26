@@ -3,11 +3,11 @@ import os
 import requests
 import pandas as pd
 import datetime
+import pytz  # Для часового пояса
 import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 from dotenv import load_dotenv
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -19,7 +19,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Файл для хранения ID чатов, куда отправлять рассылку (простая база данных)
+# Файлы данных
 SUBSCRIBERS_FILE = "subscribers.txt"
 COMPANIES_FILE = "companies.txt"
 
@@ -30,7 +30,6 @@ def get_monitored_codes():
     if not os.path.exists(COMPANIES_FILE):
         return []
     with open(COMPANIES_FILE, 'r', encoding='utf-8') as f:
-        # Читаем строки, убираем пробелы и пустые строки
         codes = [line.strip() for line in f if line.strip()]
     return codes
 
@@ -49,7 +48,7 @@ def add_subscriber(chat_id):
             f.write(f"{chat_id}\n")
 
 def check_bankruptcy_logic():
-    """Основная логика проверки (из вашего ноутбука)."""
+    """Основная логика проверки (синхронная)."""
     enterprise_codes = get_monitored_codes()
     
     if not enterprise_codes:
@@ -97,7 +96,6 @@ def check_bankruptcy_logic():
 
     # Очистка
     data_df.columns = data_df.columns.str.strip()
-    # Проверка наличия нужных колонок
     if 'firm_edrpou' not in data_df.columns:
          return "Ошибка структуры файла: нет колонки firm_edrpou"
          
@@ -130,7 +128,6 @@ def check_bankruptcy_logic():
             except ValueError:
                 continue
 
-    # Удаляем временный файл
     if os.path.exists(local_filename):
         os.remove(local_filename)
 
@@ -156,25 +153,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_subscriber(chat_id)
     await update.message.reply_text(
         f"Привет! Я добавил этот чат ({chat_id}) в список рассылки.\n"
-        "Я буду проверять реестр банкротов каждое утро в 09:00.\n"
+        "Я буду проверять реестр банкротов каждое утро в 09:00 (по Киеву).\n"
         "Чтобы проверить прямо сейчас, нажми /check"
     )
 
 async def manual_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ручной запуск проверки."""
+    """Ручной запуск."""
     await update.message.reply_text("⏳ Начинаю проверку реестра... Это может занять минуту.")
+    # Запускаем тяжелую задачу в отдельном потоке, чтобы бот не завис
     report = await asyncio.to_thread(check_bankruptcy_logic)
     await update.message.reply_text(report, parse_mode='HTML')
 
 async def scheduled_check(context: ContextTypes.DEFAULT_TYPE):
-    """Функция для автоматического запуска."""
+    """Автоматический запуск (JobQueue)."""
     subscribers = get_subscribers()
     if not subscribers:
         logging.warning("Нет подписчиков для рассылки.")
         return
 
     logging.info("Запуск проверки по расписанию...")
-    report = await asyncio.to_thread(check_bankruptcy_logic) # Запускаем тяжелую задачу в отдельном потоке
+    report = await asyncio.to_thread(check_bankruptcy_logic)
 
     for chat_id in subscribers:
         try:
@@ -189,15 +187,20 @@ if __name__ == '__main__':
         print("Ошибка: Не задан BOT_TOKEN в файле .env")
         exit()
 
+    # Создаем приложение
     application = ApplicationBuilder().token(TOKEN).build()
 
-    # Планировщик задач
-    scheduler = AsyncIOScheduler()
-    # Запускаем проверку каждый день в 09:00 утра по времени сервера
-    scheduler.add_job(scheduled_check, 'cron', hour=9, minute=0, args=[application])
-    scheduler.start()
+    # --- НАСТРОЙКА ПЛАНИРОВЩИКА (ВСТРОЕННОГО) ---
+    job_queue = application.job_queue
+    
+    # Указываем часовой пояс (Киев)
+    kyiv_tz = pytz.timezone('Europe/Kiev')
+    target_time = datetime.time(hour=9, minute=0, tzinfo=kyiv_tz)
+    
+    # Добавляем задачу: запускать scheduled_check каждый день в 09:00
+    job_queue.run_daily(scheduled_check, time=target_time)
 
-    # Хендлеры
+    # --- ХЕНДЛЕРЫ ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("check", manual_check))
 
