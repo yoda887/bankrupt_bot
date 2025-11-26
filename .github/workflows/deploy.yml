@@ -17,7 +17,7 @@ jobs:
           port: 22
           script: |
             # Переходим в папку
-            cd /root/bankruptcy_bot
+            cd /root/bankrupt_bot
             
             # Скачиваем обновления кода
             git fetch --all
