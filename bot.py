@@ -347,11 +347,72 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start - подписаться на рассылку\n"
         "/check - проверить сейчас\n"
         "/stop - отписаться\n"
+        "/debug - диагностика (проверка настроек)\n"
         "/help - эта справка\n\n"
         f"⏰ Автоматическая проверка: каждый день в 09:00\n"
         f"📊 Проверяются банкротства за последние {DAYS_TO_CHECK} дней"
     )
     await update.message.reply_text(message, parse_mode='HTML')
+
+
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /debug - диагностика"""
+    try:
+        # Проверка файлов
+        companies_exist = os.path.exists(COMPANIES_FILE)
+        subscribers_exist = os.path.exists(SUBSCRIBERS_FILE)
+        
+        codes = get_monitored_codes()
+        subs = get_subscribers()
+        
+        # Проверка интернета
+        try:
+            test_url = "https://data.gov.ua"
+            response = requests.get(test_url, timeout=10)
+            internet_ok = response.status_code == 200
+            internet_status = f"✅ OK ({response.status_code})"
+        except Exception as e:
+            internet_ok = False
+            internet_status = f"❌ Ошибка: {str(e)[:100]}"
+        
+        # Попытка получить URL ресурса
+        try:
+            resource_url = get_resource_url()
+            url_status = f"✅ {resource_url[:50]}..."
+        except Exception as e:
+            resource_url = None
+            url_status = f"❌ {str(e)[:100]}"
+        
+        message = (
+            "🔍 <b>ДИАГНОСТИКА БОТА</b>\n\n"
+            f"📁 Файл companies.txt: {'✅ Существует' if companies_exist else '❌ Не найден'}\n"
+            f"   Загружено кодов: <b>{len(codes)}</b>\n"
+            f"   Коды: {', '.join(codes[:5])}{' ...' if len(codes) > 5 else ''}\n\n"
+            f"📁 Файл subscribers.txt: {'✅ Существует' if subscribers_exist else '❌ Не найден'}\n"
+            f"   Подписчиков: <b>{len(subs)}</b>\n\n"
+            f"🌐 Доступ к data.gov.ua: {internet_status}\n\n"
+            f"🔗 URL ресурса: {url_status}\n\n"
+        )
+        
+        # Детальная проверка
+        if not codes:
+            message += "⚠️ <b>ВНИМАНИЕ:</b> Файл companies.txt пуст!\n"
+            message += "Создайте файл и добавьте коды ЄДРПОУ (по одному на строку).\n\n"
+        
+        if not internet_ok:
+            message += "⚠️ <b>ВНИМАНИЕ:</b> Нет доступа к data.gov.ua!\n"
+            message += "Проверьте интернет-соединение.\n\n"
+        
+        message += "Используйте /check для полной проверки."
+        
+        await update.message.reply_text(message, parse_mode='HTML')
+        
+    except Exception as e:
+        logger.error(f"Ошибка в debug_command: {e}", exc_info=True)
+        await update.message.reply_text(
+            f"❌ Ошибка диагностики:\n<code>{str(e)}</code>",
+            parse_mode='HTML'
+        )
 
 
 async def manual_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -366,9 +427,12 @@ async def manual_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"Ошибка в manual_check: {e}", exc_info=True)
-        await update.message.reply_text(
-            "❌ Произошла ошибка при проверке. Попробуйте позже."
+        error_msg = (
+            f"❌ Произошла ошибка при проверке:\n\n"
+            f"<code>{str(e)[:500]}</code>\n\n"
+            f"Проверьте логи бота для подробностей."
         )
+        await update.message.reply_text(error_msg, parse_mode='HTML')
 
 
 async def scheduled_check(context: ContextTypes.DEFAULT_TYPE):
@@ -425,6 +489,7 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("stop", stop))
     application.add_handler(CommandHandler("check", manual_check))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("debug", debug_command))
     
     logger.info("🤖 Бот запущен и готов к работе!")
     logger.info(f"📅 Автоматическая проверка: каждый день в {target_time.hour:02d}:{target_time.minute:02d}")
