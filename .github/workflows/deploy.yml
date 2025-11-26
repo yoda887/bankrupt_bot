@@ -1,0 +1,31 @@
+name: Deploy Bot
+
+on:
+  push:
+    branches: [ "main" ]  # Или "master", проверьте как называется ваша ветка
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          port: 22
+          script: |
+            # Переходим в папку
+            cd /root/bankruptcy_bot
+            
+            # Скачиваем обновления кода
+            git fetch --all
+            git reset --hard origin/main
+            
+            # Обновляем библиотеки (если изменились requirements.txt)
+            source venv/bin/activate
+            pip install -r requirements.txt
+            
+            # Перезапускаем службу бота
+            systemctl restart bankrupt_bot
