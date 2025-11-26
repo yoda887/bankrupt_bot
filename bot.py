@@ -287,14 +287,28 @@ def check_bankruptcy_logic():
         
         results.sort(key=lambda x: x["date_obj"], reverse=True)
         
-        message = f"⚠️ <b>НАЙДЕНЫ БАНКРОТЫ ({len(results)})</b>\n\n"
-        for i, entry in enumerate(results, 1):
+        # Ограничиваем вывод, если слишком много результатов
+        MAX_DISPLAY = 20
+        total_count = len(results)
+        display_results = results[:MAX_DISPLAY]
+        
+        message = f"⚠️ <b>НАЙДЕНЫ БАНКРОТЫ ({total_count})</b>\n\n"
+        
+        for i, entry in enumerate(display_results, 1):
+            # Укорачиваем длинные названия
+            name = entry['name']
+            if len(name) > 80:
+                name = name[:77] + "..."
+            
             message += (
                 f"{i}. <b>Код:</b> {entry['code']}\n"
-                f"🏢 <b>Компания:</b> {entry['name']}\n"
-                f"📅 <b>Дата:</b> {entry['date']}\n"
-                f"{'─' * 30}\n"
+                f"🏢 {name}\n"
+                f"📅 {entry['date']}\n"
+                f"{'-' * 25}\n"
             )
+        
+        if total_count > MAX_DISPLAY:
+            message += f"\n<i>... и еще {total_count - MAX_DISPLAY} записей</i>"
         
         return message
         
@@ -415,6 +429,34 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def send_long_message(update: Update, text: str, parse_mode='HTML'):
+    """Отправляет длинное сообщение частями (лимит Telegram 4096 символов)"""
+    MAX_LENGTH = 4000  # Оставляем запас
+    
+    if len(text) <= MAX_LENGTH:
+        await update.message.reply_text(text, parse_mode=parse_mode)
+        return
+    
+    # Разбиваем по разделителям
+    parts = []
+    current_part = ""
+    
+    for line in text.split('\n'):
+        if len(current_part) + len(line) + 1 > MAX_LENGTH:
+            parts.append(current_part)
+            current_part = line + '\n'
+        else:
+            current_part += line + '\n'
+    
+    if current_part:
+        parts.append(current_part)
+    
+    # Отправляем части
+    for i, part in enumerate(parts):
+        header = f"📄 Часть {i+1}/{len(parts)}\n\n" if len(parts) > 1 else ""
+        await update.message.reply_text(header + part, parse_mode=parse_mode)
+
+
 async def manual_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /check - ручная проверка"""
     try:
@@ -423,7 +465,8 @@ async def manual_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Запускаем в отдельном потоке
         report = await asyncio.to_thread(check_bankruptcy_logic)
         
-        await update.message.reply_text(report, parse_mode='HTML')
+        # Отправляем с поддержкой длинных сообщений
+        await send_long_message(update, report)
         
     except Exception as e:
         logger.error(f"Ошибка в manual_check: {e}", exc_info=True)
@@ -448,14 +491,39 @@ async def scheduled_check(context: ContextTypes.DEFAULT_TYPE):
     try:
         report = await asyncio.to_thread(check_bankruptcy_logic)
         
+        # Разбиваем длинное сообщение на части
+        MAX_LENGTH = 4000
+        messages = []
+        
+        if len(report) <= MAX_LENGTH:
+            messages = [report]
+        else:
+            # Разбиваем по строкам
+            parts = []
+            current_part = ""
+            
+            for line in report.split('\n'):
+                if len(current_part) + len(line) + 1 > MAX_LENGTH:
+                    parts.append(current_part)
+                    current_part = line + '\n'
+                else:
+                    current_part += line + '\n'
+            
+            if current_part:
+                parts.append(current_part)
+            
+            messages = parts
+        
         success_count = 0
         for chat_id in subscribers:
             try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=report,
-                    parse_mode='HTML'
-                )
+                for i, msg in enumerate(messages):
+                    header = f"📄 Часть {i+1}/{len(messages)}\n\n" if len(messages) > 1 else ""
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=header + msg,
+                        parse_mode='HTML'
+                    )
                 success_count += 1
             except Exception as e:
                 logger.error(f"Не удалось отправить сообщение {chat_id}: {e}")
