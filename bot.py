@@ -226,10 +226,10 @@ def check_bankruptcy_logic():
                 f"{'-'*20}\n"
             )
             message += (
-            f"{i}. <b>Код:</b> {entry['code']}\n"
-            f"🏢 <b>Компания:</b> {entry['name']}\n"
-            f"📅 <b>Дата:</b> {entry['date']}\n"
-            f"_____________________\n"
+                f"{i}. <b>Код:</b> {entry['code']}\n"
+                f"🏢 <b>Компания:</b> {entry['name']}\n"
+                f"📅 <b>Дата:</b> {entry['date']}\n"
+                f"_____________________\n"
             )
         return message
     else:
