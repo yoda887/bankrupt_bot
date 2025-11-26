@@ -54,75 +54,127 @@ def check_bankruptcy_logic():
     if not enterprise_codes:
         return "Список предприятий (companies.txt) пуст или не найден."
 
+    # Маскировка под обычный браузер (ОБЯЗАТЕЛЬНО для серверов)
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+    }
+
     # 1. Получение ссылки
     dataset_id = '544d4dad-0b6d-4972-b0b8-fb266829770f'
     package_show_url = f'https://data.gov.ua/api/3/action/package_show?id={dataset_id}'
+    resource_url = None
     
+    # Попытка 1: Через API
     try:
-        response = requests.get(package_show_url, timeout=10)
+        logging.info("Попытка получения URL через API...")
+        response = requests.get(package_show_url, headers=headers, timeout=15)
         data_json = response.json()
         if data_json.get('success'):
-            resource_url = data_json['result']['resources'][-1]['url']
-        else:
-            resource_url = 'https://data.gov.ua/dataset/544d4dad-0b6d-4972-b0b8-fb266829770f/resource/deb76481-a6c8-4a45-ae6c-f02aa87e9f4a/download/vidomosti-pro-spravi-pro-bankrutstvo.csv'
+            # Ищем ресурс с форматом CSV или последний добавленный
+            resources = data_json['result']['resources']
+            if resources:
+                resource_url = resources[-1]['url']
+                logging.info(f"URL получен через API: {resource_url}")
     except Exception as e:
-        logging.error(f"Ошибка получения метаданных: {e}")
-        return "Ошибка доступа к data.gov.ua API."
+        logging.warning(f"API недоступен, пробую прямую ссылку: {e}")
+
+    # Попытка 2: Если API не сработал, используем "вечную" прямую ссылку
+    if not resource_url:
+        # Это прямая ссылка на ресурс, которая часто остается неизменной
+        resource_url = 'https://data.gov.ua/dataset/544d4dad-0b6d-4972-b0b8-fb266829770f/resource/deb76481-a6c8-4a45-ae6c-f02aa87e9f4a/download/vidomosti-pro-spravi-pro-bankrutstvo.csv'
+        logging.info("Используется резервная прямая ссылка.")
 
     # 2. Скачивание
     local_filename = "bankruptcy_temp.csv"
     try:
-        response = requests.get(resource_url, stream=True, timeout=60)
+        logging.info(f"Начинаю скачивание файла по адресу: {resource_url}")
+        # verify=False иногда нужен, если у госсайтов просрочены SSL сертификаты (бывает часто)
+        response = requests.get(resource_url, headers=headers, stream=True, timeout=120, verify=False)
         response.raise_for_status()
+        
         with open(local_filename, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
+        logging.info("Файл успешно скачан.")
     except Exception as e:
-        logging.error(f"Ошибка скачивания файла: {e}")
-        return "Не удалось скачать файл реестра."
+        logging.error(f"Критическая ошибка скачивания: {e}")
+        return f"Не удалось скачать файл реестра. Ошибка: {str(e)[:100]}"
 
     # 3. Чтение
-    try:
-        data_df = pd.read_csv(
-            local_filename,
-            sep=None,
-            engine="python",
-            on_bad_lines="skip",
-            encoding="utf-8",
-            encoding_errors='replace'
-        )
-    except Exception as e:
-        return f"Ошибка чтения CSV: {e}"
+    data_df = None
+    # Пробуем разные кодировки, так как госсайты часто меняют их
+    for encoding in ["utf-8", "cp1251", "windows-1251", "latin-1"]:
+        try:
+            data_df = pd.read_csv(
+                local_filename,
+                sep=None,
+                engine="python",
+                on_bad_lines="skip",
+                encoding=encoding
+            )
+            logging.info(f"CSV прочитан с кодировкой: {encoding}")
+            break
+        except Exception:
+            continue
+    
+    if data_df is None:
+        return "Ошибка: не удалось подобрать кодировку файла."
 
     # Очистка
     data_df.columns = data_df.columns.str.strip()
-    if 'firm_edrpou' not in data_df.columns:
-         return "Ошибка структуры файла: нет колонки firm_edrpou"
+    
+    # Поиск нужной колонки (иногда названия меняются, ищем ту, где есть 'код' или 'edrpou')
+    edrpou_col = None
+    for col in data_df.columns:
+        if 'код' in col.lower() or 'edrpou' in col.lower() or 'єдрпоу' in col.lower():
+            edrpou_col = col
+            break
+    
+    if not edrpou_col:
+         # Если не нашли умным поиском, пробуем стандартное имя, если оно есть
+         if 'firm_edrpou' in data_df.columns:
+             edrpou_col = 'firm_edrpou'
+         else:
+             return f"Ошибка структуры файла: не найдена колонка с кодом ЕГРПОУ. Доступные колонки: {list(data_df.columns)}"
          
-    data_df['firm_edrpou'] = data_df['firm_edrpou'].astype(str).str.strip()
-    data_df['firm_name'] = data_df['firm_name'].astype(str).str.strip()
+    # Приводим к строке и чистим
+    data_df['clean_code'] = data_df[edrpou_col].astype(str).str.strip()
+    
+    # Ищем колонку с названием
+    name_col = next((col for col in data_df.columns if 'назва' in col.lower() or 'name' in col.lower()), data_df.columns[1])
+    # Ищем колонку с датой
+    date_col = next((col for col in data_df.columns if 'дата' in col.lower() or 'date' in col.lower()), None)
+
+    if not date_col:
+        return "Ошибка структуры: не найдена колонка с датой."
 
     # 4. Поиск
     date_threshold = datetime.datetime.strptime("01.01.2025", "%d.%m.%Y").date()
     results = []
 
     for code in enterprise_codes:
-        info = data_df[data_df['firm_edrpou'] == code]
+        info = data_df[data_df['clean_code'] == code]
         if not info.empty:
-            full_name = info['firm_name'].values[0]
-            date_str = info['date'].values[0]
+            # Берем последнюю запись
+            row = info.iloc[0]
+            full_name = str(row[name_col])
+            date_str = str(row[date_col])
             
-            if pd.isna(date_str):
+            if pd.isna(date_str) or date_str.lower() == 'nan':
                 continue
             
-            date_str = str(date_str).strip()
+            date_str = date_str.strip()
             try:
-                date_obj = datetime.datetime.strptime(date_str, "%d.%m.%Y").date()
+                # Пытаемся парсить дату (иногда бывает формат с временем)
+                clean_date_str = date_str.split()[0] 
+                date_obj = datetime.datetime.strptime(clean_date_str, "%d.%m.%Y").date()
+                
                 if date_obj > date_threshold:
                     results.append({
                         "code": code,
                         "name": full_name,
-                        "date": date_str,
+                        "date": clean_date_str,
                         "date_obj": date_obj
                     })
             except ValueError:
