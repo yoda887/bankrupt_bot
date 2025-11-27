@@ -6,7 +6,7 @@ import datetime
 import pytz
 import asyncio
 import sqlite3
-import html  # <--- ВОТ ЭТА БИБЛИОТЕКА ОБЯЗАТЕЛЬНА ДЛЯ РАБОТЫ escape()
+import html
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 from dotenv import load_dotenv
@@ -21,90 +21,69 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Файлы и настройки
-SUBSCRIBERS_FILE = "subscribers.txt"
-COMPANIES_FILE = "companies.txt"
+# Настройки
 DB_FILE = "bankrupt.db"
-
-# Дата отсечения (старые банкротства до этой даты игнорируем)
+COMPANIES_FILE_TXT = "companies.txt" # Старый файл для импорта
+# Глобальная дата отсечения (старые банкротства до этой даты игнорируем)
 GLOBAL_START_DATE = datetime.datetime.strptime("01.01.2025", "%d.%m.%Y").date()
-
-# --- РАБОТА С ТЕКСТОВЫМИ ФАЙЛАМИ ---
-
-def get_monitored_codes():
-    """Читает список кодов для мониторинга из файла."""
-    if not os.path.exists(COMPANIES_FILE): return []
-    with open(COMPANIES_FILE, 'r', encoding='utf-8') as f:
-        return [line.strip() for line in f if line.strip()]
-
-def add_monitored_code(code):
-    """Добавляет код предприятия в файл, если его там нет."""
-    codes = get_monitored_codes()
-    if code not in codes:
-        with open(COMPANIES_FILE, 'a', encoding='utf-8') as f:
-            f.write(f"{code}\n")
-        return True
-    return False
-
-def get_subscribers():
-    """Читает список ID подписчиков."""
-    if not os.path.exists(SUBSCRIBERS_FILE): return set()
-    with open(SUBSCRIBERS_FILE, 'r') as f:
-        return set(line.strip() for line in f if line.strip())
-
-def manage_subscriber(chat_id, action="add"):
-    """Добавляет или удаляет подписчика."""
-    subs = get_subscribers()
-    chat_id_str = str(chat_id)
-    
-    if action == "add":
-        if chat_id_str not in subs:
-            with open(SUBSCRIBERS_FILE, 'a') as f:
-                f.write(f"{chat_id_str}\n")
-            return True
-    elif action == "remove":
-        if chat_id_str in subs:
-            subs.remove(chat_id_str)
-            with open(SUBSCRIBERS_FILE, 'w') as f:
-                f.write("\n".join(subs) + "\n")
-            return True
-    return False
 
 # --- ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ---
 
 def init_db():
-    """Создает таблицы в SQLite, если их нет."""
+    """Создает сложную структуру БД для многопользовательского режима."""
     with sqlite3.connect(DB_FILE) as conn:
-        # Таблица для текущих данных из реестра (перезаписывается при обновлении)
-        conn.execute("""
+        cursor = conn.cursor()
+        
+        # 1. Таблица сырых данных (общий реестр)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS bankrupts (
                 firm_edrpou TEXT,
                 firm_name TEXT,
                 date TEXT
             )
         """)
-        
-        # Таблица истории (что мы уже видели/отправили)
-        # Храним уникальную пару (код + дата), чтобы различать разные дела
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS history (
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_edrpou ON bankrupts (firm_edrpou)")
+
+        # 2. Таблица пользователей (статус подписки)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                chat_id INTEGER PRIMARY KEY,
+                is_active INTEGER DEFAULT 1
+            )
+        """)
+
+        # 3. Таблица подписок (Кто -> За кем следит)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                chat_id INTEGER,
+                firm_edrpou TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, firm_edrpou)
+            )
+        """)
+
+        # 4. Таблица истории уведомлений (Кто -> О чем уже знает)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sent_history (
+                chat_id INTEGER,
                 firm_edrpou TEXT,
                 date TEXT,
-                seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (firm_edrpou, date)
+                sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, firm_edrpou, date)
             )
         """)
         
-        # Индексы для скорости
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_edrpou ON bankrupts (firm_edrpou)")
+        # МИГРАЦИЯ: Если таблица users была пуста, заполним её существующими подписчиками как активными
+        cursor.execute("INSERT OR IGNORE INTO users (chat_id, is_active) SELECT DISTINCT chat_id, 1 FROM subscriptions")
+        
+        conn.commit()
 
-# --- ЛОГИКА ОБНОВЛЕНИЯ И ПОИСКА ---
+# --- ЯДРО: ОБНОВЛЕНИЕ БАЗЫ (ГЛОБАЛЬНОЕ) ---
 
 def update_database_logic():
-    """Скачивает CSV и обновляет таблицу bankrupts."""
-    logging.info("Начало обновления базы...")
+    """Скачивает CSV и обновляет общую таблицу bankrupts."""
+    logging.info("Начало скачивания базы...")
     
-    # 1. Получаем ссылку через API
     try:
         api_url = 'https://data.gov.ua/api/3/action/package_show?id=544d4dad-0b6d-4972-b0b8-fb266829770f'
         resp = requests.get(api_url, timeout=10).json()
@@ -115,7 +94,6 @@ def update_database_logic():
     except Exception as e:
         return False, f"Ошибка API: {e}"
 
-    # 2. Скачиваем файл
     csv_file = "temp_bankrupt.csv"
     try:
         r = requests.get(resource_url, stream=True, timeout=120)
@@ -125,186 +103,256 @@ def update_database_logic():
     except Exception as e:
         return False, f"Ошибка скачивания: {e}"
 
-    # 3. Читаем и пишем в SQL
     try:
         df = pd.read_csv(csv_file, sep=None, engine="python", on_bad_lines="skip", encoding="utf-8", encoding_errors='replace')
-        
         df.columns = df.columns.str.strip()
-        # Стандартизация данных
         df['firm_edrpou'] = df['firm_edrpou'].astype(str).str.strip()
         df['firm_name'] = df['firm_name'].astype(str).str.strip()
         df['date'] = df['date'].astype(str).str.strip()
         
         with sqlite3.connect(DB_FILE) as conn:
-            # Полная замена таблицы свежими данными
             df.to_sql('bankrupts', conn, if_exists='replace', index=False)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_edrpou ON bankrupts (firm_edrpou)")
             
-        logging.info("База успешно обновлена.")
+        logging.info("База обновлена.")
         return True, "База обновлена."
     except Exception as e:
         return False, f"Ошибка импорта: {e}"
     finally:
         if os.path.exists(csv_file): os.remove(csv_file)
 
-def get_bankruptcies(save_to_history=True, ignore_history=False):
-    """
-    Универсальная функция поиска.
-    Возвращает список банкротов из companies.txt, которые есть в базе.
-    """
-    codes = get_monitored_codes()
-    if not codes:
-        return [], "Список мониторинга пуст."
+# --- ЛОГИКА: ПЕРСОНАЛЬНЫЙ ПОИСК ---
 
-    if not os.path.exists(DB_FILE):
-        return [], "База данных не найдена. Сначала /update."
+def check_user_subscriptions(chat_id, save_history=True):
+    """
+    Проверяет банкротства ТОЛЬКО для конкретного пользователя.
+    Возвращает только те записи, которые пользователь еще не видел.
+    """
+    if not os.path.exists(DB_FILE): return [], "База пуста."
 
-    items = []
+    new_items = []
     
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         
-        placeholders = ','.join('?' for _ in codes)
-        query = f"SELECT firm_edrpou, firm_name, date FROM bankrupts WHERE firm_edrpou IN ({placeholders})"
-        cursor.execute(query, codes)
-        rows = cursor.fetchall()
+        # 1. Получаем список кодов, за которыми следит этот юзер
+        user_codes = cursor.execute(
+            "SELECT firm_edrpou FROM subscriptions WHERE chat_id = ?", 
+            (chat_id,)
+        ).fetchall()
+        
+        if not user_codes:
+            return [], "У вас нет активных подписок. Используйте /addcompany или /import_txt"
 
-        for code, name, date_str in rows:
+        codes_list = [c[0] for c in user_codes]
+        
+        # 2. Ищем эти коды в таблице банкротов
+        placeholders = ','.join('?' for _ in codes_list)
+        query = f"SELECT firm_edrpou, firm_name, date FROM bankrupts WHERE firm_edrpou IN ({placeholders})"
+        cursor.execute(query, codes_list)
+        matches = cursor.fetchall()
+
+        for code, name, date_str in matches:
+            # Фильтр по дате
             try:
                 date_obj = datetime.datetime.strptime(date_str, "%d.%m.%Y").date()
-                if date_obj <= GLOBAL_START_DATE:
-                    continue
+                if date_obj <= GLOBAL_START_DATE: continue
             except: continue
 
-            if not ignore_history:
+            # Фильтр по ЛИЧНОЙ истории (отправляли ли МЫ ЭТОМУ юзеру ЭТУ запись)
+            if save_history:
                 seen = cursor.execute(
-                    "SELECT 1 FROM history WHERE firm_edrpou = ? AND date = ?", 
-                    (code, date_str)
+                    "SELECT 1 FROM sent_history WHERE chat_id = ? AND firm_edrpou = ? AND date = ?", 
+                    (chat_id, code, date_str)
                 ).fetchone()
-                if seen:
-                    continue 
+                if seen: continue 
 
-            items.append({
+            new_items.append({
                 "code": code,
                 "name": name,
                 "date": date_str,
                 "date_obj": date_obj
             })
 
-        items.sort(key=lambda x: x["date_obj"])
-
-        if save_to_history and items:
-            data = [(i['code'], i['date']) for i in items]
+        # 3. Записываем в историю, что мы показали эти данные этому юзеру
+        if save_history and new_items:
+            history_data = [(chat_id, i['code'], i['date']) for i in new_items]
             cursor.executemany(
-                "INSERT OR IGNORE INTO history (firm_edrpou, date) VALUES (?, ?)", 
-                data
+                "INSERT OR IGNORE INTO sent_history (chat_id, firm_edrpou, date) VALUES (?, ?, ?)", 
+                history_data
             )
             conn.commit()
+            
+    new_items.sort(key=lambda x: x["date_obj"])
+    return new_items, "OK"
 
-    return items, "OK"
+# --- УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ И ПОДПИСКАМИ (SQL) ---
 
-def is_history_empty():
-    """Проверяет, пустая ли таблица истории."""
-    if not os.path.exists(DB_FILE): return True
+def db_set_user_active(chat_id, is_active=True):
+    """Устанавливает статус рассылки для пользователя."""
     with sqlite3.connect(DB_FILE) as conn:
-        count = conn.execute("SELECT count(*) FROM history").fetchone()[0]
-    return count == 0
+        # UPSERT: Вставляем или обновляем
+        conn.execute("""
+            INSERT INTO users (chat_id, is_active) VALUES (?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET is_active = excluded.is_active
+        """, (chat_id, 1 if is_active else 0))
 
-# --- ХЕНДЛЕРЫ КОМАНД ---
+def db_add_subscription(chat_id, code):
+    with sqlite3.connect(DB_FILE) as conn:
+        try:
+            # При добавлении компании делаем юзера активным
+            db_set_user_active(chat_id, True)
+            conn.execute("INSERT INTO subscriptions (chat_id, firm_edrpou) VALUES (?, ?)", (chat_id, code))
+            return True
+        except sqlite3.IntegrityError:
+            return False # Уже есть
+
+def db_del_subscription(chat_id, code):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.execute("DELETE FROM subscriptions WHERE chat_id = ? AND firm_edrpou = ?", (chat_id, code))
+        return cursor.rowcount > 0
+
+def db_get_user_subscriptions(chat_id):
+    with sqlite3.connect(DB_FILE) as conn:
+        rows = conn.execute("SELECT firm_edrpou FROM subscriptions WHERE chat_id = ?", (chat_id,)).fetchall()
+    return [r[0] for r in rows]
+
+def db_get_active_users():
+    """Получает список пользователей, у которых включена рассылка."""
+    with sqlite3.connect(DB_FILE) as conn:
+        # Берем пользователей, которые есть в таблице users с флагом 1 И имеют хотя бы 1 подписку
+        rows = conn.execute("""
+            SELECT DISTINCT u.chat_id 
+            FROM users u
+            JOIN subscriptions s ON u.chat_id = s.chat_id
+            WHERE u.is_active = 1
+        """).fetchall()
+    return [r[0] for r in rows]
+
+# --- ХЕНДЛЕРЫ ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    added = manage_subscriber(update.effective_chat.id, "add")
-    msg = "✅ Вы подписались на рассылку." if added else "ℹ️ Вы уже подписаны."
+    # Активируем подписку
+    db_set_user_active(update.effective_chat.id, True)
     
     await update.message.reply_text(
-        f"{msg}\n\n"
-        "<b>Команды бота:</b>\n"
-        "/check — Проверить новых банкротов\n"
-        "/find &lt;код&gt; — Найти компанию по коду (в базе)\n" 
-        "/addcompany &lt;код&gt; — Добавить компанию в мониторинг\n"
-        "/update — Скачать свежую базу\n"
-        "/clear_history — Очистить память\n"
-        "/stop — Отписаться\n"
-        "/menu — Список команд",
+        "👋 <b>Персональный Бот Банкротств</b>\n\n"
+        "Я ежедневно проверяю реестр и сообщаю только о <b>ваших</b> компаниях.\n\n"
+        "<b>Команды:</b>\n"
+        "➕ <code>/addcompany 12345678</code> — Добавить в мой список\n"
+        "➖ <code>/delcompany 12345678</code> — Удалить из списка\n"
+        "📂 <code>/import_txt</code> — Импортировать все из companies.txt\n"
+        "📋 <code>/mycompanies</code> — Мой список\n"
+        "🔍 <code>/check</code> — Проверить мои компании сейчас\n"
+        "🧹 <code>/clear_history</code> — Сбросить мою историю просмотров\n"
+        "🔎 <code>/find 12345678</code> — Глобальный поиск по базе\n"
+        "🔕 <code>/stop</code> — Приостановить рассылку (список сохранится)",
         parse_mode='HTML'
     )
 
-async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = "Доступны следующие команды бота." if added else "ℹ️ Вы уже подписаны."
-    
-    await update.message.reply_text(
-        f"{msg}\n\n"
-        "<b>Команды бота:</b>\n"
-        "/check — Проверить новых банкротов\n"
-        "/find &lt;код&gt; — Найти компанию по коду (в базе)\n" 
-        "/addcompany &lt;код&gt; — Добавить компанию в мониторинг\n"
-        "/update — Скачать свежую базу\n"
-        "/clear_history — Очистить память\n"
-        "/stop — Отписаться",
-        parse_mode='HTML'
-    )
-
-async def add_company_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Добавляет компанию в список мониторинга."""
+async def add_company(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Укажите код: `/addcompany 12345678`", parse_mode='Markdown')
+        await update.message.reply_text("Пример: `/addcompany 30991664`", parse_mode='Markdown')
         return
-    
     code = context.args[0].strip()
-    
     if not code.isdigit():
         await update.message.reply_text("❌ Код должен состоять только из цифр.")
         return
-        
-    if add_monitored_code(code):
-        await update.message.reply_text(f"✅ Компания с кодом <b>{code}</b> добавлена в список мониторинга.", parse_mode='HTML')
+    
+    if db_add_subscription(update.effective_chat.id, code):
+        await update.message.reply_text(f"✅ Код <b>{code}</b> добавлен в ваш список. Рассылка активна.", parse_mode='HTML')
     else:
-        await update.message.reply_text(f"ℹ️ Компания с кодом <b>{code}</b> уже есть в списке.", parse_mode='HTML')
+        await update.message.reply_text(f"ℹ️ Код <b>{code}</b> уже есть в вашем списке.", parse_mode='HTML')
+
+async def import_txt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Импортирует коды из старого файла companies.txt в БД текущего пользователя."""
+    if not os.path.exists(COMPANIES_FILE_TXT):
+        await update.message.reply_text("⚠️ Файл companies.txt не найден на сервере.")
+        return
+
+    chat_id = update.effective_chat.id
+    added_count = 0
+    total_found = 0
+    
+    await update.message.reply_text("⏳ Начинаю импорт из файла...")
+
+    try:
+        with open(COMPANIES_FILE_TXT, 'r', encoding='utf-8') as f:
+            for line in f:
+                code = line.strip()
+                if code and code.isdigit():
+                    total_found += 1
+                    if db_add_subscription(chat_id, code):
+                        added_count += 1
+        
+        await update.message.reply_text(
+            f"✅ <b>Импорт завершен!</b>\n\n"
+            f"📂 Найдено кодов: {total_found}\n"
+            f"➕ Добавлено новых: {added_count}\n"
+            f"📋 Теперь они в вашем списке (/mycompanies).",
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка при чтении файла: {e}")
+
+async def del_company(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Пример: `/delcompany 30991664`", parse_mode='Markdown')
+        return
+    code = context.args[0].strip()
+    
+    if db_del_subscription(update.effective_chat.id, code):
+        await update.message.reply_text(f"🗑 Код <b>{code}</b> удален из вашего списка.", parse_mode='HTML')
+    else:
+        await update.message.reply_text(f"ℹ️ Кода <b>{code}</b> не было в вашем списке.", parse_mode='HTML')
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    removed = manage_subscriber(update.effective_chat.id, "remove")
-    msg = "🔕 Вы отписались." if removed else "ℹ️ Вы не были подписаны."
-    await update.message.reply_text(msg)
+    """Отключает рассылку, но сохраняет список."""
+    db_set_user_active(update.effective_chat.id, False)
+    await update.message.reply_text(
+        "🔕 <b>Рассылка отключена.</b>\n"
+        "Ваш список компаний сохранен. Вы можете проверять его вручную через /check.\n"
+        "Чтобы возобновить рассылку, нажмите /start или добавьте новую компанию.", 
+        parse_mode='HTML'
+    )
+
+async def my_companies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    codes = db_get_user_subscriptions(update.effective_chat.id)
+    if not codes:
+        await update.message.reply_text("📭 Ваш список пуст.")
+        return
+    text = f"📋 <b>Ваш список ({len(codes)} шт):</b>\n" + "\n".join(f"• <code>{c}</code>" for c in codes)
+    await update.message.reply_text(text, parse_mode='HTML')
 
 async def clear_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if os.path.exists(DB_FILE):
-        with sqlite3.connect(DB_FILE) as conn:
-            conn.execute("DELETE FROM history")
-            conn.commit()
-    await update.message.reply_text("🧹 История очищена. Команда /check теперь покажет полный список за 2025 год.")
+    chat_id = update.effective_chat.id
+    with sqlite3.connect(DB_FILE) as conn:
+        # Удаляем историю только для этого юзера
+        conn.execute("DELETE FROM sent_history WHERE chat_id = ?", (chat_id,))
+    await update.message.reply_text("🧹 Ваша история просмотров очищена.")
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Проверяю...")
-    
-    first_run = await asyncio.to_thread(is_history_empty)
-    items, msg = await asyncio.to_thread(get_bankruptcies, save_to_history=True, ignore_history=False)
+    await update.message.reply_text("🔍 Проверяю ваш список...")
+    items, msg = await asyncio.to_thread(check_user_subscriptions, update.effective_chat.id, save_history=True)
     
     if not items:
-        await update.message.reply_text("✅ Новых банкротств не найдено.")
+        # Если список пуст, это может быть потому что нет подписок
+        if msg != "OK": await update.message.reply_text(f"ℹ️ {msg}")
+        else: await update.message.reply_text("✅ По вашим компаниям новых банкротств нет.")
         return
 
-    if first_run:
-        header = f"📋 <b>ПОЛНЫЙ СПИСОК (Первый запуск, {len(items)} шт):</b>"
-    else:
-        header = f"🚨 <b>НОВЫЕ БАНКРОТСТВА ({len(items)} шт):</b>"
-
-    text = f"{header}\n\n"
-    for index, i in enumerate(items, 1):
-        safe_name = html.escape(i['name'])
-        text += f"{index}. 🆔 <b>{i['code']}</b>\n🏢 {safe_name}\n📅 {i['date']}\n────────────────\n"
+    text = f"🚨 <b>НОВЫЕ СОБЫТИЯ ({len(items)}):</b>\n\n"
+    for i, item in enumerate(items, 1):
+        safe_name = html.escape(item['name'])
+        text += f"{i}. 🆔 <b>{item['code']}</b>\n🏢 {safe_name}\n📅 {item['date']}\n────────────────\n"
     
-    if len(text) > 4000:
-        for x in range(0, len(text), 4000):
-            await update.message.reply_text(text[x:x+4000], parse_mode='HTML')
-    else:
-        await update.message.reply_text(text, parse_mode='HTML')
+    await update.message.reply_text(text, parse_mode='HTML')
 
 async def find_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ищет конкретный код, игнорируя историю."""
+    """Глобальный поиск по базе (без привязки к пользователю)."""
     if not context.args:
-        await update.message.reply_text("Укажите код: `/find 30991664`", parse_mode='Markdown')
+        await update.message.reply_text("Пример: `/find 30991664`", parse_mode='Markdown')
         return
-    
     code = context.args[0].strip()
     
     def db_search(c):
@@ -322,51 +370,56 @@ async def find_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result, parse_mode='HTML')
 
 async def manual_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Обновляю базу (это может занять 1-2 минуты)...")
+    """Обновляет базу и запускает проверку для текущего юзера."""
+    await update.message.reply_text("⏳ Обновляю общую базу...")
     res, msg = await asyncio.to_thread(update_database_logic)
-    
     if res:
-        await update.message.reply_text("✅ База обновлена. Запускаю проверку...")
+        await update.message.reply_text("✅ База обновлена. Проверяю ваши подписки...")
         await check_command(update, context)
     else:
         await update.message.reply_text(f"❌ {msg}")
 
-# --- ЕЖЕДНЕВНАЯ ЗАДАЧА ---
+# --- ЕЖЕДНЕВНАЯ ЗАДАЧА (МАССОВАЯ РАССЫЛКА) ---
 
 async def daily_routine(context: ContextTypes.DEFAULT_TYPE):
     logging.info("Start daily routine")
     
+    # 1. Обновляем общую базу данных
     res, msg = await asyncio.to_thread(update_database_logic)
     if not res:
         logging.error(f"Daily update failed: {msg}")
         return
 
-    items, _ = await asyncio.to_thread(get_bankruptcies, save_to_history=True, ignore_history=False)
+    # 2. Получаем список АКТИВНЫХ пользователей с подписками
+    users = await asyncio.to_thread(db_get_active_users)
     
     is_monday = (datetime.datetime.now().weekday() == 0)
-    message = None
     
-    if items:
-        message = f"🚨 <b>СВЕЖИЕ БАНКРОТСТВА ({len(items)}):</b>\n\n"
-        for index, i in enumerate(items, 1):
-            safe_name = html.escape(i['name'])
-            message += f"{index}. 🆔 <b>{i['code']}</b>\n🏢 {safe_name}\n📅 {i['date']}\n────────────────\n"
-    elif is_monday:
-        message = "👋 <b>Понедельник.</b>\nБот работает штатно. База обновлена, новых банкротов из вашего списка не найдено."
-    
-    if message:
-        for chat_id in get_subscribers():
-            try:
+    # 3. Проходим по каждому пользователю индивидуально
+    for chat_id in users:
+        try:
+            # Проверяем подписки конкретного юзера
+            items, _ = await asyncio.to_thread(check_user_subscriptions, chat_id, save_history=True)
+            
+            message = None
+            if items:
+                message = f"🚨 <b>СВЕЖИЕ БАНКРОТСТВА ({len(items)}):</b>\n\n"
+                for i, item in enumerate(items, 1):
+                    safe_name = html.escape(item['name'])
+                    message += f"{i}. 🆔 <b>{item['code']}</b>\n🏢 {safe_name}\n📅 {item['date']}\n────────────────\n"
+            elif is_monday:
+                message = "👋 <b>Понедельник.</b>\nБот работает. По вашему списку компаний новых банкротств нет."
+            
+            if message:
                 await context.bot.send_message(chat_id, message, parse_mode='HTML')
-            except Exception as e:
-                logging.error(f"Send error {chat_id}: {e}")
+                
+        except Exception as e:
+            logging.error(f"Error checking for user {chat_id}: {e}")
 
 # --- ЗАПУСК ---
 
 if __name__ == '__main__':
-    if not TOKEN:
-        print("CRITICAL: BOT_TOKEN not found in .env")
-        exit()
+    if not TOKEN: exit("NO TOKEN")
     
     init_db()
     
@@ -374,16 +427,19 @@ if __name__ == '__main__':
     
     jq = app.job_queue
     kyiv_tz = pytz.timezone('Europe/Kiev')
+    # Ежедневная проверка в 09:00
     jq.run_daily(daily_routine, time=datetime.time(hour=9, minute=0, tzinfo=kyiv_tz))
     
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("addcompany", add_company))
+    app.add_handler(CommandHandler("import_txt", import_txt_command)) # <-- Новая команда
+    app.add_handler(CommandHandler("delcompany", del_company))
     app.add_handler(CommandHandler("stop", stop_command))
+    app.add_handler(CommandHandler("mycompanies", my_companies))
     app.add_handler(CommandHandler("check", check_command))
     app.add_handler(CommandHandler("find", find_one))
-    app.add_handler(CommandHandler("addcompany", add_company_command))
     app.add_handler(CommandHandler("update", manual_update))
     app.add_handler(CommandHandler("clear_history", clear_history_command))
-     app.add_handler(CommandHandler("menu", menu))
 
-    print("Bot is running...")
+    print("Multi-user Bot Started...")
     app.run_polling()
