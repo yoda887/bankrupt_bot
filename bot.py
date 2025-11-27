@@ -219,9 +219,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"{msg}\n\n"
         "<b>Команды бота:</b>\n"
-        "/check — Проверить НОВЫЕ события\n"
-        "/find &lt;код&gt; — Найти фирму по коду (в базе)\n" 
-        "/addcompany &lt;код&gt; — Добавить фирму в мониторинг\n"
+        "/check — Проверить новых банкротов\n"
+        "/find &lt;код&gt; — Найти компанию по коду (в базе)\n" 
+        "/addcompany &lt;код&gt; — Добавить компанию в мониторинг\n"
+        "/update — Скачать свежую базу\n"
+        "/clear_history — Очистить память\n"
+        "/stop — Отписаться\n"
+        "/menu — Список команд",
+        parse_mode='HTML'
+    )
+
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = "Доступны следующие команды бота." if added else "ℹ️ Вы уже подписаны."
+    
+    await update.message.reply_text(
+        f"{msg}\n\n"
+        "<b>Команды бота:</b>\n"
+        "/check — Проверить новых банкротов\n"
+        "/find &lt;код&gt; — Найти компанию по коду (в базе)\n" 
+        "/addcompany &lt;код&gt; — Добавить компанию в мониторинг\n"
         "/update — Скачать свежую базу\n"
         "/clear_history — Очистить память\n"
         "/stop — Отписаться",
@@ -367,6 +383,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("addcompany", add_company_command))
     app.add_handler(CommandHandler("update", manual_update))
     app.add_handler(CommandHandler("clear_history", clear_history_command))
+     app.add_handler(CommandHandler("menu", menu))
 
     print("Bot is running...")
     app.run_polling()
