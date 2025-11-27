@@ -6,6 +6,7 @@ import datetime
 import pytz
 import asyncio
 import sqlite3
+import html
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 from dotenv import load_dotenv
