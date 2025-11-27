@@ -142,7 +142,7 @@ def check_user_subscriptions(chat_id, save_history=True):
         ).fetchall()
         
         if not user_codes:
-            return [], "У вас нет активных подписок. Используйте /addcompany или /import_txt"
+            return [], "У вас нет активных подписок. Используйте /addcompany"
 
         codes_list = [c[0] for c in user_codes]
         
@@ -241,7 +241,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Команды:</b>\n"
         "➕ <code>/addcompany 12345678</code> — Добавить в мой список\n"
         "➖ <code>/delcompany 12345678</code> — Удалить из списка\n"
-        "📂 <code>/import_txt</code> — Импортировать все из companies.txt\n"
+        #"📂 <code>/import_txt</code> — Импортировать все из companies.txt\n"
         "📋 <code>/mycompanies</code> — Мой список\n"
         "🔍 <code>/check</code> — Проверить мои компании сейчас\n"
         "🧹 <code>/clear_history</code> — Сбросить мою историю просмотров\n"
@@ -432,7 +432,7 @@ if __name__ == '__main__':
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("addcompany", add_company))
-    app.add_handler(CommandHandler("import_txt", import_txt_command)) # <-- Новая команда
+    #app.add_handler(CommandHandler("import_txt", import_txt_command)) # <-- Новая команда
     app.add_handler(CommandHandler("delcompany", del_company))
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("mycompanies", my_companies))
