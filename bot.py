@@ -259,9 +259,12 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         header = f"🚨 <b>НОВЫЕ БАНКРОТСТВА ({len(items)} шт):</b>"
 
     text = f"{header}\n\n"
+        
     for index, i in enumerate(items, 1):
-        text += f"{index}. 🆔 <b>{i['code']}</b>\n🏢 {i['name']}\n📅 {i['date']}\n────────────────\n"
-    
+        # Экранируем имя, чтобы кавычки или < > в названии фирмы не сломали HTML
+        safe_name = html.escape(i['name'])
+        text += f"{index}. 🆔 <b>{i['code']}</b>\n🏢 {safe_name}\n📅 {i['date']}\n\n"
+
     # Разбиваем длинные сообщения
     if len(text) > 4000:
         for x in range(0, len(text), 4000):
@@ -322,7 +325,8 @@ async def daily_routine(context: ContextTypes.DEFAULT_TYPE):
     if items:
         message = f"🚨 <b>СВЕЖИЕ БАНКРОТСТВА ({len(items)}):</b>\n\n"
         for index, i in enumerate(items, 1):
-            message += f"{index}. 🆔 <b>{i['code']}</b>\n🏢 {i['name']}\n📅 {i['date']}\n────────────────\n"
+            safe_name = html.escape(i['name'])
+            message += f"{index}. 🆔 <b>{i['code']}</b>\n🏢 {safe_name}\n📅 {i['date']}\n────────────────\n"
     elif is_monday:
         # В понедельник шлем "пульс", даже если пусто
         message = "👋 <b>Понедельник.</b>\nБот работает штатно. База обновлена, новых банкротов из вашего списка не найдено."
