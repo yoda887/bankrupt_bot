@@ -6,7 +6,7 @@ import datetime
 import pytz
 import asyncio
 import sqlite3
-import html
+import html  # <--- ВОТ ЭТА БИБЛИОТЕКА ОБЯЗАТЕЛЬНА ДЛЯ РАБОТЫ escape()
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 from dotenv import load_dotenv
@@ -36,6 +36,15 @@ def get_monitored_codes():
     if not os.path.exists(COMPANIES_FILE): return []
     with open(COMPANIES_FILE, 'r', encoding='utf-8') as f:
         return [line.strip() for line in f if line.strip()]
+
+def add_monitored_code(code):
+    """Добавляет код предприятия в файл, если его там нет."""
+    codes = get_monitored_codes()
+    if code not in codes:
+        with open(COMPANIES_FILE, 'a', encoding='utf-8') as f:
+            f.write(f"{code}\n")
+        return True
+    return False
 
 def get_subscribers():
     """Читает список ID подписчиков."""
@@ -142,9 +151,6 @@ def get_bankruptcies(save_to_history=True, ignore_history=False):
     """
     Универсальная функция поиска.
     Возвращает список банкротов из companies.txt, которые есть в базе.
-    
-    save_to_history: Если True, найденные записи добавляются в историю (чтобы не показывать потом).
-    ignore_history: Если True, показывает все записи, даже если мы их уже видели.
     """
     codes = get_monitored_codes()
     if not codes:
@@ -164,21 +170,19 @@ def get_bankruptcies(save_to_history=True, ignore_history=False):
         rows = cursor.fetchall()
 
         for code, name, date_str in rows:
-            # Фильтр по дате (только 2025+)
             try:
                 date_obj = datetime.datetime.strptime(date_str, "%d.%m.%Y").date()
                 if date_obj <= GLOBAL_START_DATE:
                     continue
             except: continue
 
-            # Фильтр по истории
             if not ignore_history:
                 seen = cursor.execute(
                     "SELECT 1 FROM history WHERE firm_edrpou = ? AND date = ?", 
                     (code, date_str)
                 ).fetchone()
                 if seen:
-                    continue # Пропускаем, так как уже видели
+                    continue 
 
             items.append({
                 "code": code,
@@ -189,7 +193,6 @@ def get_bankruptcies(save_to_history=True, ignore_history=False):
 
         items.sort(key=lambda x: x["date_obj"])
 
-        # Запись в историю
         if save_to_history and items:
             data = [(i['code'], i['date']) for i in items]
             cursor.executemany(
@@ -212,16 +215,35 @@ def is_history_empty():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     added = manage_subscriber(update.effective_chat.id, "add")
     msg = "✅ Вы подписались на рассылку." if added else "ℹ️ Вы уже подписаны."
+    
     await update.message.reply_text(
         f"{msg}\n\n"
-        "<b>Команды:</b>\n"
-        "/check — Проверить НОВЫЕ события (с учетом истории)\n"
-        "/find &lt;код&gt; — Найти фирму по коду (в базе)\n"
+        "<b>Команды бота:</b>\n"
+        "/check — Проверить НОВЫЕ события\n"
+        "/find &lt;код&gt; — Найти фирму по коду (в базе)\n" 
+        "/addcompany &lt;код&gt; — Добавить фирму в мониторинг\n"
         "/update — Скачать свежую базу\n"
-        "/clear_history — Очистить память (следующая проверка покажет всё)\n"
+        "/clear_history — Очистить память\n"
         "/stop — Отписаться",
         parse_mode='HTML'
     )
+
+async def add_company_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Добавляет компанию в список мониторинга."""
+    if not context.args:
+        await update.message.reply_text("Укажите код: `/addcompany 12345678`", parse_mode='Markdown')
+        return
+    
+    code = context.args[0].strip()
+    
+    if not code.isdigit():
+        await update.message.reply_text("❌ Код должен состоять только из цифр.")
+        return
+        
+    if add_monitored_code(code):
+        await update.message.reply_text(f"✅ Компания с кодом <b>{code}</b> добавлена в список мониторинга.", parse_mode='HTML')
+    else:
+        await update.message.reply_text(f"ℹ️ Компания с кодом <b>{code}</b> уже есть в списке.", parse_mode='HTML')
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     removed = manage_subscriber(update.effective_chat.id, "remove")
@@ -236,37 +258,25 @@ async def clear_history_command(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text("🧹 История очищена. Команда /check теперь покажет полный список за 2025 год.")
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Умная проверка:
-    1. Если история пуста -> показывает ВСЕ (как начальная инициализация).
-    2. Если история есть -> показывает ТОЛЬКО НОВЫЕ.
-    """
     await update.message.reply_text("🔍 Проверяю...")
     
-    # Проверяем, первый ли это запуск
     first_run = await asyncio.to_thread(is_history_empty)
-    
-    # Ищем банкротов и сразу сохраняем в историю (чтобы не показывать второй раз)
     items, msg = await asyncio.to_thread(get_bankruptcies, save_to_history=True, ignore_history=False)
     
     if not items:
         await update.message.reply_text("✅ Новых банкротств не найдено.")
         return
 
-    # Формируем заголовок
     if first_run:
         header = f"📋 <b>ПОЛНЫЙ СПИСОК (Первый запуск, {len(items)} шт):</b>"
     else:
         header = f"🚨 <b>НОВЫЕ БАНКРОТСТВА ({len(items)} шт):</b>"
 
     text = f"{header}\n\n"
-        
     for index, i in enumerate(items, 1):
-        # Экранируем имя, чтобы кавычки или < > в названии фирмы не сломали HTML
         safe_name = html.escape(i['name'])
-        text += f"{index}. 🆔 <b>{i['code']}</b>\n🏢 {safe_name}\n📅 {i['date']}\n\n"
-
-    # Разбиваем длинные сообщения
+        text += f"{index}. 🆔 <b>{i['code']}</b>\n🏢 {safe_name}\n📅 {i['date']}\n────────────────\n"
+    
     if len(text) > 4000:
         for x in range(0, len(text), 4000):
             await update.message.reply_text(text[x:x+4000], parse_mode='HTML')
@@ -287,7 +297,9 @@ async def find_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rows = conn.execute("SELECT firm_name, date FROM bankrupts WHERE firm_edrpou = ?", (c,)).fetchall()
         if not rows: return f"✅ По коду {c} ничего не найдено."
         res = f"🔎 <b>Результаты по {c}:</b>\n"
-        for n, d in rows: res += f"\n- {n} ({d})"
+        for n, d in rows: 
+            safe_n = html.escape(n)
+            res += f"\n- {safe_n} ({d})"
         return res
 
     result = await asyncio.to_thread(db_search, code)
@@ -299,7 +311,6 @@ async def manual_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if res:
         await update.message.reply_text("✅ База обновлена. Запускаю проверку...")
-        # После обновления запускаем проверку (как /check)
         await check_command(update, context)
     else:
         await update.message.reply_text(f"❌ {msg}")
@@ -309,18 +320,14 @@ async def manual_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def daily_routine(context: ContextTypes.DEFAULT_TYPE):
     logging.info("Start daily routine")
     
-    # 1. Обновляем базу
     res, msg = await asyncio.to_thread(update_database_logic)
     if not res:
         logging.error(f"Daily update failed: {msg}")
         return
 
-    # 2. Ищем ТОЛЬКО НОВЫЕ (и сохраняем их в историю)
     items, _ = await asyncio.to_thread(get_bankruptcies, save_to_history=True, ignore_history=False)
     
-    # 3. Логика отправки
-    is_monday = (datetime.datetime.now().weekday() == 0) # Понедельник = 0
-    
+    is_monday = (datetime.datetime.now().weekday() == 0)
     message = None
     
     if items:
@@ -329,10 +336,8 @@ async def daily_routine(context: ContextTypes.DEFAULT_TYPE):
             safe_name = html.escape(i['name'])
             message += f"{index}. 🆔 <b>{i['code']}</b>\n🏢 {safe_name}\n📅 {i['date']}\n────────────────\n"
     elif is_monday:
-        # В понедельник шлем "пульс", даже если пусто
         message = "👋 <b>Понедельник.</b>\nБот работает штатно. База обновлена, новых банкротов из вашего списка не найдено."
     
-    # Если message не None, рассылаем
     if message:
         for chat_id in get_subscribers():
             try:
@@ -347,21 +352,19 @@ if __name__ == '__main__':
         print("CRITICAL: BOT_TOKEN not found in .env")
         exit()
     
-    # Инициализация БД
     init_db()
     
     app = ApplicationBuilder().token(TOKEN).build()
     
-    # Планировщик (09:00 Киев)
     jq = app.job_queue
     kyiv_tz = pytz.timezone('Europe/Kiev')
     jq.run_daily(daily_routine, time=datetime.time(hour=9, minute=0, tzinfo=kyiv_tz))
     
-    # Команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("check", check_command))
     app.add_handler(CommandHandler("find", find_one))
+    app.add_handler(CommandHandler("addcompany", add_company_command))
     app.add_handler(CommandHandler("update", manual_update))
     app.add_handler(CommandHandler("clear_history", clear_history_command))
 
