@@ -344,7 +344,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = f"🚨 <b>НОВЫЕ СОБЫТИЯ ({len(items)}):</b>\n\n"
     for i, item in enumerate(items, 1):
         safe_name = html.escape(item['name'])
-        text += f"{i}. 🆔 <b>{item['code']}</b>\n🏢 {safe_name}\n📅 {item['date']}\n────────────────\n"
+        text += f"{i}. 🆔 <b>{item['code']}</b>\n🏢 {safe_name}\n📅 {item['date']}\n\n"
     
     await update.message.reply_text(text, parse_mode='HTML')
 
@@ -406,7 +406,7 @@ async def daily_routine(context: ContextTypes.DEFAULT_TYPE):
                 message = f"🚨 <b>СВЕЖИЕ БАНКРОТСТВА ({len(items)}):</b>\n\n"
                 for i, item in enumerate(items, 1):
                     safe_name = html.escape(item['name'])
-                    message += f"{i}. 🆔 <b>{item['code']}</b>\n🏢 {safe_name}\n📅 {item['date']}\n────────────────\n"
+                    message += f"{i}. 🆔 <b>{item['code']}</b>\n🏢 {safe_name}\n📅 {item['date']}\n\n"
             elif is_monday:
                 message = "👋 <b>Понедельник.</b>\nБот работает. По вашему списку компаний новых банкротств нет."
             
