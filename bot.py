@@ -215,7 +215,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{msg}\n\n"
         "<b>Команды:</b>\n"
         "/check — Проверить НОВЫЕ события (с учетом истории)\n"
-        "/find <code> — Найти фирму по коду (в базе)\n"
+        "/find &lt;код&gt; — Найти фирму по коду (в базе)\n"
         "/update — Скачать свежую базу\n"
         "/clear_history — Очистить память (следующая проверка покажет всё)\n"
         "/stop — Отписаться",
