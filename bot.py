@@ -320,9 +320,9 @@ async def daily_routine(context: ContextTypes.DEFAULT_TYPE):
     message = None
     
     if items:
-        message = f"🚨 <b>СВЕЖИЕ БАНКРОТСТВА ({len(items)}):</b>\n\n"
+        message = f"🚨 <b>НОВІ БАНКРУТСТВА ({len(items)}):</b>\n\n"
         for index, i in enumerate(items, 1):
-            message += f"{index}. 🆔 <b>{i['code']}</b>\n🏢 {i['name']}\n📅 {i['date']}\n────────────────\n"
+            message += f"<b>{index}.</b> 🆔 <b>{i['code']}</b>\n🏢 {i['name']}\n📅 {i['date']}\n\n"
     elif is_monday:
         # В понедельник шлем "пульс", даже если пусто
         message = "👋 <b>Понедельник.</b>\nБот работает штатно. База обновлена, новых банкротов из вашего списка не найдено."
