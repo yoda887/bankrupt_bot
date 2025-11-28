@@ -8,7 +8,14 @@ import asyncio
 import sqlite3
 import html
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
+from telegram.ext import (
+    ApplicationBuilder, 
+    ContextTypes, 
+    CommandHandler, 
+    ConversationHandler, 
+    MessageHandler, 
+    filters
+)
 from dotenv import load_dotenv
 
 # --- КОНФИГУРАЦИЯ ---
@@ -22,10 +29,15 @@ logging.basicConfig(
 )
 
 # Настройки
+ADMIN_CHAT_ID = 889325852
 DB_FILE = "bankrupt.db"
-COMPANIES_FILE_TXT = "companies.txt" # Старый файл для импорта
-# Глобальная дата отсечения (старые банкротства до этой даты игнорируем)
+COMPANIES_FILE_TXT = "companies.txt"
 GLOBAL_START_DATE = datetime.datetime.strptime("01.01.2025", "%d.%m.%Y").date()
+
+# Состояния для ConversationHandler
+FIND_WAITING_CODE = 1
+ADD_WAITING_CODE = 2
+DEL_WAITING_CODE = 3
 
 # --- ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ---
 
@@ -73,9 +85,8 @@ def init_db():
             )
         """)
         
-        # МИГРАЦИЯ: Если таблица users была пуста, заполним её существующими подписчиками как активными
+        # МИГРАЦИЯ
         cursor.execute("INSERT OR IGNORE INTO users (chat_id, is_active) SELECT DISTINCT chat_id, 1 FROM subscriptions")
-        
         conn.commit()
 
 # --- ЯДРО: ОБНОВЛЕНИЕ БАЗЫ (ГЛОБАЛЬНОЕ) ---
@@ -124,10 +135,7 @@ def update_database_logic():
 # --- ЛОГИКА: ПЕРСОНАЛЬНЫЙ ПОИСК ---
 
 def check_user_subscriptions(chat_id, save_history=True):
-    """
-    Проверяет банкротства ТОЛЬКО для конкретного пользователя.
-    Возвращает только те записи, которые пользователь еще не видел.
-    """
+    """Проверяет банкротства ТОЛЬКО для конкретного пользователя."""
     if not os.path.exists(DB_FILE): return [], "База пуста."
 
     new_items = []
@@ -135,7 +143,6 @@ def check_user_subscriptions(chat_id, save_history=True):
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         
-        # 1. Получаем список кодов, за которыми следит этот юзер
         user_codes = cursor.execute(
             "SELECT firm_edrpou FROM subscriptions WHERE chat_id = ?", 
             (chat_id,)
@@ -146,20 +153,17 @@ def check_user_subscriptions(chat_id, save_history=True):
 
         codes_list = [c[0] for c in user_codes]
         
-        # 2. Ищем эти коды в таблице банкротов
         placeholders = ','.join('?' for _ in codes_list)
         query = f"SELECT firm_edrpou, firm_name, date FROM bankrupts WHERE firm_edrpou IN ({placeholders})"
         cursor.execute(query, codes_list)
         matches = cursor.fetchall()
 
         for code, name, date_str in matches:
-            # Фильтр по дате
             try:
                 date_obj = datetime.datetime.strptime(date_str, "%d.%m.%Y").date()
                 if date_obj <= GLOBAL_START_DATE: continue
             except: continue
 
-            # Фильтр по ЛИЧНОЙ истории (отправляли ли МЫ ЭТОМУ юзеру ЭТУ запись)
             if save_history:
                 seen = cursor.execute(
                     "SELECT 1 FROM sent_history WHERE chat_id = ? AND firm_edrpou = ? AND date = ?", 
@@ -174,7 +178,6 @@ def check_user_subscriptions(chat_id, save_history=True):
                 "date_obj": date_obj
             })
 
-        # 3. Записываем в историю, что мы показали эти данные этому юзеру
         if save_history and new_items:
             history_data = [(chat_id, i['code'], i['date']) for i in new_items]
             cursor.executemany(
@@ -189,9 +192,7 @@ def check_user_subscriptions(chat_id, save_history=True):
 # --- УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ И ПОДПИСКАМИ (SQL) ---
 
 def db_set_user_active(chat_id, is_active=True):
-    """Устанавливает статус рассылки для пользователя."""
     with sqlite3.connect(DB_FILE) as conn:
-        # UPSERT: Вставляем или обновляем
         conn.execute("""
             INSERT INTO users (chat_id, is_active) VALUES (?, ?)
             ON CONFLICT(chat_id) DO UPDATE SET is_active = excluded.is_active
@@ -200,12 +201,11 @@ def db_set_user_active(chat_id, is_active=True):
 def db_add_subscription(chat_id, code):
     with sqlite3.connect(DB_FILE) as conn:
         try:
-            # При добавлении компании делаем юзера активным
             db_set_user_active(chat_id, True)
             conn.execute("INSERT INTO subscriptions (chat_id, firm_edrpou) VALUES (?, ?)", (chat_id, code))
             return True
         except sqlite3.IntegrityError:
-            return False # Уже есть
+            return False
 
 def db_del_subscription(chat_id, code):
     with sqlite3.connect(DB_FILE) as conn:
@@ -218,9 +218,7 @@ def db_get_user_subscriptions(chat_id):
     return [r[0] for r in rows]
 
 def db_get_active_users():
-    """Получает список пользователей, у которых включена рассылка."""
     with sqlite3.connect(DB_FILE) as conn:
-        # Берем пользователей, которые есть в таблице users с флагом 1 И имеют хотя бы 1 подписку
         rows = conn.execute("""
             SELECT DISTINCT u.chat_id 
             FROM users u
@@ -232,49 +230,32 @@ def db_get_active_users():
 # --- ХЕНДЛЕРЫ ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Активируем подписку
     db_set_user_active(update.effective_chat.id, True)
-    
     await update.message.reply_text(
         "👋 <b>Бот Монітор Банкрутств</b>\n\n"
-        "Я щоденно перевіряю реєстр та повідомляю про нові банкрутства компаній або фізичних осіб з вашого списку.\n\n"
+        "Я щоденно перевіряю реєстр та повідомляю про нові банкрутства.\n\n"
         "<b>Команди:</b>\n"
-        "/addcompany 12345678 — Додати компанію або фізичну особу у список для стеження\n"
-        "/delcompany 12345678 — Видалити зі списку\n"
-        #"/import_txt — Импортировать все из companies.txt\n"
+        "/addcompany — Додати код у список стеження\n"
+        "/delcompany — Видалити зі списку\n"
         "/mycompanies — Мій список для стеження\n"
         "/check — Перевірити мій список зараз\n"
         "/clear_history — Скинути історію переглядів\n"
-        "/find 12345678 — Пошук компанії або фізічної особи в рєстрі банкротів\n"
-        "/stop — Зупинити розсилку (список збережиться)",
+        "/find — Пошук по базі банкротів\n"
+        "/stop — Зупинити розсилку",
         parse_mode='HTML'
     )
-
-async def add_company(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Пример: `/addcompany 30991664`", parse_mode='Markdown')
-        return
-    code = context.args[0].strip()
-    if not code.isdigit():
-        await update.message.reply_text("❌ Код має складатися тільки з цифр.")
-        return
-    
-    if db_add_subscription(update.effective_chat.id, code):
-        await update.message.reply_text(f"✅ Код <b>{code}</b> доданий до вашого списку. Розсилка активна.", parse_mode='HTML')
-    else:
-        await update.message.reply_text(f"ℹ️ Код <b>{code}</b> вже є у вашому списку.", parse_mode='HTML')
 
 async def import_txt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Импортирует коды из старого файла companies.txt в БД текущего пользователя."""
     if not os.path.exists(COMPANIES_FILE_TXT):
-        await update.message.reply_text("⚠️ Файл companies.txt не найден на сервере.")
+        await update.message.reply_text("?? Файл companies.txt не найден на сервере.")
         return
 
     chat_id = update.effective_chat.id
     added_count = 0
     total_found = 0
     
-    await update.message.reply_text("⏳ Начинаю импорт из файла...")
+    await update.message.reply_text("? Начинаю импорт из файла...")
 
     try:
         with open(COMPANIES_FILE_TXT, 'r', encoding='utf-8') as f:
@@ -286,35 +267,81 @@ async def import_txt_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         added_count += 1
         
         await update.message.reply_text(
-            f"✅ <b>Импорт завершен!</b>\n\n"
-            f"📂 Найдено кодов: {total_found}\n"
-            f"➕ Добавлено новых: {added_count}\n"
-            f"📋 Теперь они в вашем списке (/mycompanies).",
+            f"? <b>Импорт завершен!</b>\n\n"
+            f"?? Найдено кодов: {total_found}\n"
+            f"? Добавлено новых: {added_count}\n"
+            f"?? Теперь они в вашем списке (/mycompanies).",
             parse_mode='HTML'
         )
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка при чтении файла: {e}")
+        await update.message.reply_text(f"? Ошибка при чтении файла: {e}")
+# --- ЛОГИКА ДОБАВЛЕНИЯ (ADD) ---
 
-async def del_company(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Приклад: `/delcompany 30991664`", parse_mode='Markdown')
+async def add_company_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 1: Старт добавления."""
+    # Поддержка быстрого добавления (/addcompany 123)
+    if context.args:
+        code = context.args[0].strip()
+        await _add_company_logic(update, code)
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "Введіть код (ЄДРПОУ або ІПН) для додавання до списку:\n"
+        "Для скасування введіть /cancel"
+    )
+    return ADD_WAITING_CODE
+
+async def add_company_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 2: Обработка ввода кода."""
+    code = update.message.text.strip()
+    await _add_company_logic(update, code)
+    return ConversationHandler.END
+
+async def _add_company_logic(update, code):
+    """Общая логика добавления в БД."""
+    if not code.isdigit():
+        await update.message.reply_text("❌ Код має складатися тільки з цифр.")
         return
-    code = context.args[0].strip()
     
-    if db_del_subscription(update.effective_chat.id, code):
-        await update.message.reply_text(f"🗑 Код <b>{code}</b> видалений з вашого списку.", parse_mode='HTML')
+    if db_add_subscription(update.effective_chat.id, code):
+        await update.message.reply_text(f"✅ Код <b>{code}</b> доданий. Розсилка активна.", parse_mode='HTML')
     else:
-        await update.message.reply_text(f"ℹ️ Кода <b>{code}</b> не було у вашому списку.", parse_mode='HTML')
+        await update.message.reply_text(f"ℹ️ Код <b>{code}</b> вже є у вашому списку.", parse_mode='HTML')
+
+# --- ЛОГИКА УДАЛЕНИЯ (DEL) ---
+
+async def del_company_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 1: Старт удаления."""
+    # Поддержка быстрого удаления (/delcompany 123)
+    if context.args:
+        code = context.args[0].strip()
+        await _del_company_logic(update, code)
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "🗑 Введіть код (ЄДРПОУ або ІПН) для видалення:\n"
+        "Для скасування введіть /cancel"
+    )
+    return DEL_WAITING_CODE
+
+async def del_company_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 2: Обработка ввода кода."""
+    code = update.message.text.strip()
+    await _del_company_logic(update, code)
+    return ConversationHandler.END
+
+async def _del_company_logic(update, code):
+    """Общая логика удаления из БД."""
+    if db_del_subscription(update.effective_chat.id, code):
+        await update.message.reply_text(f"🗑 Код <b>{code}</b> видалений.", parse_mode='HTML')
+    else:
+        await update.message.reply_text(f"ℹ️ Кода <b>{code}</b> не було у списку.", parse_mode='HTML')
+
+# --- ДРУГИЕ ХЕНДЛЕРЫ ---
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отключает рассылку, но сохраняет список."""
     db_set_user_active(update.effective_chat.id, False)
-    await update.message.reply_text(
-        "🔕 <b>Розсилка відключена.</b>\n"
-        "Ваш список компаній збережений. Ви можете перевіряти його вручну за командою /check.\n"
-        "Для відновлення розсилки, натисніть /start або додайте нову компанію.", 
-        parse_mode='HTML'
-    )
+    await update.message.reply_text("🔕 Розсилка відключена.", parse_mode='HTML')
 
 async def my_companies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     codes = db_get_user_subscriptions(update.effective_chat.id)
@@ -327,7 +354,6 @@ async def my_companies(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clear_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     with sqlite3.connect(DB_FILE) as conn:
-        # Удаляем историю только для этого юзера
         conn.execute("DELETE FROM sent_history WHERE chat_id = ?", (chat_id,))
     await update.message.reply_text("🧹 Ваша історія переглядів очищена.")
 
@@ -336,7 +362,6 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     items, msg = await asyncio.to_thread(check_user_subscriptions, update.effective_chat.id, save_history=True)
     
     if not items:
-        # Если список пуст, это может быть потому что нет подписок
         if msg != "OK": await update.message.reply_text(f"ℹ️ {msg}")
         else: await update.message.reply_text("✅ По вашому списку нових банкрутств немає.")
         return
@@ -348,13 +373,30 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(text, parse_mode='HTML')
 
-async def find_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Глобальный поиск по базе (без привязки к пользователю)."""
-    if not context.args:
-        await update.message.reply_text("Приклад: `/find 30991664`", parse_mode='Markdown')
-        return
-    code = context.args[0].strip()
+async def manual_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Оновлюю загальну базу...")
+    res, msg = await asyncio.to_thread(update_database_logic)
+    if res:
+        await update.message.reply_text("✅ База оновлена. Перевіряю ваші підписки...")
+        await check_command(update, context)
+    else:
+        await update.message.reply_text(f"❌ {msg}")
+
+# --- ФУНКЦИИ ДЛЯ CONVERSATION HANDLER (/find) ---
+
+async def find_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 1: Пользователь вводит /find, бот просит код."""
+    await update.message.reply_text(
+        "🔎 Введіть код (ЄДРПОУ або ІПН) для пошуку:\n"
+        "Для скасування введіть /cancel"
+    )
+    return FIND_WAITING_CODE
+
+async def find_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 2: Пользователь ввел код, бот ищет и отвечает."""
+    code = update.message.text.strip()
     
+    # Логика поиска в БД
     def db_search(c):
         if not os.path.exists(DB_FILE): return "База не скачана."
         with sqlite3.connect(DB_FILE) as conn:
@@ -366,41 +408,40 @@ async def find_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res += f"\n- {safe_n} ({d})"
         return res
 
+    await update.message.reply_text("⏳ Шукаю...")
     result = await asyncio.to_thread(db_search, code)
     await update.message.reply_text(result, parse_mode='HTML')
+    
+    # Завершаем разговор
+    return ConversationHandler.END
 
-async def manual_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обновляет базу и запускает проверку для текущего юзера."""
-    await update.message.reply_text("⏳ Оновлюю загальну базу...")
-    res, msg = await asyncio.to_thread(update_database_logic)
-    if res:
-        await update.message.reply_text("✅ База оновлена. Перевіряю ваші підписки...")
-        await check_command(update, context)
-    else:
-        await update.message.reply_text(f"❌ {msg}")
+async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Общая функция отмены для всех диалогов."""
+    await update.message.reply_text("❌ Операція скасована.")
+    return ConversationHandler.END
 
 # --- ЕЖЕДНЕВНАЯ ЗАДАЧА (МАССОВАЯ РАССЫЛКА) ---
 
 async def daily_routine(context: ContextTypes.DEFAULT_TYPE):
     logging.info("Start daily routine")
     
-    # 1. Обновляем общую базу данных
     res, msg = await asyncio.to_thread(update_database_logic)
     if not res:
-        logging.error(f"Daily update failed: {msg}")
+        try:
+            await context.bot.send_message(
+                ADMIN_CHAT_ID, 
+                f"⚠️ <b>Ошибка утреннего обновления!</b>\n{html.escape(msg)}", 
+                parse_mode='HTML'
+            )
+        except: pass
         return
 
-    # 2. Получаем список АКТИВНЫХ пользователей с подписками
     users = await asyncio.to_thread(db_get_active_users)
-    
     is_monday = (datetime.datetime.now().weekday() == 0)
     
-    # 3. Проходим по каждому пользователю индивидуально
     for chat_id in users:
         try:
-            # Проверяем подписки конкретного юзера
             items, _ = await asyncio.to_thread(check_user_subscriptions, chat_id, save_history=True)
-            
             message = None
             if items:
                 message = f"🚨 <b>НОВІ БАНКРУТСТВА ({len(items)}):</b>\n\n"
@@ -427,19 +468,46 @@ if __name__ == '__main__':
     
     jq = app.job_queue
     kyiv_tz = pytz.timezone('Europe/Kiev')
-    # Ежедневная проверка в 09:00
     jq.run_daily(daily_routine, time=datetime.time(hour=9, minute=0, tzinfo=kyiv_tz))
     
+    # Обычные команды
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("addcompany", add_company))
-    #app.add_handler(CommandHandler("import_txt", import_txt_command)) # <-- Новая команда
-    app.add_handler(CommandHandler("delcompany", del_company))
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("mycompanies", my_companies))
     app.add_handler(CommandHandler("check", check_command))
-    app.add_handler(CommandHandler("find", find_one))
     app.add_handler(CommandHandler("update", manual_update))
     app.add_handler(CommandHandler("clear_history", clear_history_command))
+     #app.add_handler(CommandHandler("import_txt", import_txt_command)) # <-- Новая команда
+    
+    # 1. Диалог для поиска (/find)
+    find_handler = ConversationHandler(
+        entry_points=[CommandHandler('find', find_start)],
+        states={
+            FIND_WAITING_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, find_answer)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel_operation)]
+    )
+    app.add_handler(find_handler)
+
+    # 2. Диалог для добавления (/addcompany)
+    add_handler = ConversationHandler(
+        entry_points=[CommandHandler('addcompany', add_company_start)],
+        states={
+            ADD_WAITING_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_company_handle)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel_operation)]
+    )
+    app.add_handler(add_handler)
+
+    # 3. Диалог для удаления (/delcompany)
+    del_handler = ConversationHandler(
+        entry_points=[CommandHandler('delcompany', del_company_start)],
+        states={
+            DEL_WAITING_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, del_company_handle)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel_operation)]
+    )
+    app.add_handler(del_handler)
 
     print("Multi-user Bot Started...")
     app.run_polling()
