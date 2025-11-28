@@ -286,8 +286,7 @@ async def add_company_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     await update.message.reply_text(
-        "Введіть код (ЄДРПОУ або ІПН) для додавання до списку:\n"
-        "Для скасування введіть /cancel"
+        "Введіть код (ЄДРПОУ або ІПН) для додавання до списку або для скасування введіть /cancel"
     )
     return ADD_WAITING_CODE
 
@@ -319,8 +318,7 @@ async def del_company_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     await update.message.reply_text(
-        "🗑 Введіть код (ЄДРПОУ або ІПН) для видалення:\n"
-        "Для скасування введіть /cancel"
+        "🗑 Введіть код (ЄДРПОУ або ІПН) для видалення або для скасування введіть /cancel"
     )
     return DEL_WAITING_CODE
 
@@ -387,8 +385,7 @@ async def manual_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def find_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Шаг 1: Пользователь вводит /find, бот просит код."""
     await update.message.reply_text(
-        "🔎 Введіть код (ЄДРПОУ або ІПН) для пошуку:\n"
-        "Для скасування введіть /cancel"
+        "🔎 Введіть код (ЄДРПОУ або ІПН) для пошуку або для скасування введіть /cancel"
     )
     return FIND_WAITING_CODE
 
