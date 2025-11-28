@@ -191,12 +191,28 @@ def check_user_subscriptions(chat_id, save_history=True):
 
 # --- УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ И ПОДПИСКАМИ (SQL) ---
 
+#def db_set_user_active(chat_id, is_active=True):
+#    with sqlite3.connect(DB_FILE) as conn:
+#        conn.execute("""
+#            INSERT INTO users (chat_id, is_active) VALUES (?, ?)
+#            ON CONFLICT(chat_id) DO UPDATE SET is_active = excluded.is_active
+#        """, (chat_id, 1 if is_active else 0))
+
 def db_set_user_active(chat_id, is_active=True):
+    """Возвращает True, если это новый пользователь."""
+    is_new_user = False
     with sqlite3.connect(DB_FILE) as conn:
+        # Проверяем наличие пользователя до вставки
+        cursor = conn.execute("SELECT 1 FROM users WHERE chat_id = ?", (chat_id,))
+        if not cursor.fetchone():
+            is_new_user = True
+
         conn.execute("""
             INSERT INTO users (chat_id, is_active) VALUES (?, ?)
             ON CONFLICT(chat_id) DO UPDATE SET is_active = excluded.is_active
         """, (chat_id, 1 if is_active else 0))
+    return is_new_user
+
 
 def db_add_subscription(chat_id, code):
     with sqlite3.connect(DB_FILE) as conn:
@@ -229,8 +245,41 @@ def db_get_active_users():
 
 # --- ХЕНДЛЕРЫ ---
 
+#async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#    db_set_user_active(update.effective_chat.id, True)
+#    await update.message.reply_text(
+#        "👋 <b>Бот Монітор Банкрутств</b>\n\n"
+#        "Я щоденно перевіряю реєстр та повідомляю про нові банкрутства.\n\n"
+#        "<b>Команди:</b>\n"
+#        "/addcompany — Додати код у список стеження\n"
+#        "/delcompany — Видалити зі списку\n"
+#        "/mycompanies — Мій список для стеження\n"
+#        "/check — Перевірити мій список зараз\n"
+#        "/clear_history — Скинути історію переглядів\n"
+#        "/find — Пошук по базі банкротів\n"
+#        "/stop — Зупинити розсилку",
+#        parse_mode='HTML'
+#    )
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db_set_user_active(update.effective_chat.id, True)
+    # Регистрируем пользователя и проверяем, новый ли он
+    is_new = db_set_user_active(update.effective_chat.id, True)
+    
+    # Если новый - отправляем уведомление админу
+    if is_new:
+        try:
+            user = update.effective_user
+            username = f"@{user.username}" if user.username else "без юзернейма"
+            admin_text = (
+                f"👤 <b>Новий користувач бота!</b>\n"
+                f"🆔 ID: <code>{user.id}</code>\n"
+                f"📝 Имя: {html.escape(user.full_name)}\n"
+                f"🔗 Линк: {username}"
+            )
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text, parse_mode='HTML')
+        except Exception as e:
+            logging.error(f"Не удалось отправить уведомление админу: {e}")
+
     await update.message.reply_text(
         "👋 <b>Бот Монітор Банкрутств</b>\n\n"
         "Я щоденно перевіряю реєстр та повідомляю про нові банкрутства.\n\n"
