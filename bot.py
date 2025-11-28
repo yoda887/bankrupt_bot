@@ -115,9 +115,9 @@ def update_database_logic():
             conn.execute("CREATE INDEX IF NOT EXISTS idx_edrpou ON bankrupts (firm_edrpou)")
             
         logging.info("База обновлена.")
-        return True, "База обновлена."
+        return True, "База оновлена."
     except Exception as e:
-        return False, f"Ошибка импорта: {e}"
+        return False, f"Помилка імпорту: {e}"
     finally:
         if os.path.exists(csv_file): os.remove(csv_file)
 
@@ -142,7 +142,7 @@ def check_user_subscriptions(chat_id, save_history=True):
         ).fetchall()
         
         if not user_codes:
-            return [], "У вас нет активных подписок. Используйте /addcompany"
+            return [], "У вас немає активних підписок. Використайте /addcompany"
 
         codes_list = [c[0] for c in user_codes]
         
@@ -236,17 +236,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_set_user_active(update.effective_chat.id, True)
     
     await update.message.reply_text(
-        "👋 <b>Персональный Бот Банкротств</b>\n\n"
-        "Я ежедневно проверяю реестр и сообщаю только о <b>ваших</b> компаниях.\n\n"
-        "<b>Команды:</b>\n"
-        "/addcompany 12345678 — Добавить в мой список\n"
-        "/delcompany 12345678 — Удалить из списка\n"
+        "👋 <b>Бот Монітор Банкрутств</b>\n\n"
+        "Я щоденно перевіряю реєстр та повідомляю про нові банкрутства компаній або фізичних осіб з вашого списку.\n\n"
+        "<b>Команди:</b>\n"
+        "/addcompany 12345678 — Додати компанію або фізичну особу у список для стеження\n"
+        "/delcompany 12345678 — Видалити зі списку\n"
         #"/import_txt — Импортировать все из companies.txt\n"
-        "/mycompanies — Мой список\n"
-        "/check — Проверить мои компании сейчас\n"
-        "/clear_history — Сбросить мою историю просмотров\n"
-        "/find 12345678 — Глобальный поиск по базе\n"
-        "/stop — Приостановить рассылку (список сохранится)",
+        "/mycompanies — Мій список для стеження\n"
+        "/check — Перевірити мій список зараз\n"
+        "/clear_history — Скинути історію переглядів\n"
+        "/find 12345678 — Пошук компанії або фізічної особи в рєстрі банкротів\n"
+        "/stop — Зупинити розсилку (список збережиться)",
         parse_mode='HTML'
     )
 
@@ -256,13 +256,13 @@ async def add_company(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     code = context.args[0].strip()
     if not code.isdigit():
-        await update.message.reply_text("❌ Код должен состоять только из цифр.")
+        await update.message.reply_text("❌ Код має складатися тільки з цифр.")
         return
     
     if db_add_subscription(update.effective_chat.id, code):
-        await update.message.reply_text(f"✅ Код <b>{code}</b> добавлен в ваш список. Рассылка активна.", parse_mode='HTML')
+        await update.message.reply_text(f"✅ Код <b>{code}</b> доданий до вашого списку. Розсилка активна.", parse_mode='HTML')
     else:
-        await update.message.reply_text(f"ℹ️ Код <b>{code}</b> уже есть в вашем списке.", parse_mode='HTML')
+        await update.message.reply_text(f"ℹ️ Код <b>{code}</b> вже є у вашому списку.", parse_mode='HTML')
 
 async def import_txt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Импортирует коды из старого файла companies.txt в БД текущего пользователя."""
@@ -297,29 +297,29 @@ async def import_txt_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def del_company(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Пример: `/delcompany 30991664`", parse_mode='Markdown')
+        await update.message.reply_text("Приклад: `/delcompany 30991664`", parse_mode='Markdown')
         return
     code = context.args[0].strip()
     
     if db_del_subscription(update.effective_chat.id, code):
-        await update.message.reply_text(f"🗑 Код <b>{code}</b> удален из вашего списка.", parse_mode='HTML')
+        await update.message.reply_text(f"🗑 Код <b>{code}</b> видалений з вашого списку.", parse_mode='HTML')
     else:
-        await update.message.reply_text(f"ℹ️ Кода <b>{code}</b> не было в вашем списке.", parse_mode='HTML')
+        await update.message.reply_text(f"ℹ️ Кода <b>{code}</b> не було у вашому списку.", parse_mode='HTML')
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отключает рассылку, но сохраняет список."""
     db_set_user_active(update.effective_chat.id, False)
     await update.message.reply_text(
-        "🔕 <b>Рассылка отключена.</b>\n"
-        "Ваш список компаний сохранен. Вы можете проверять его вручную через /check.\n"
-        "Чтобы возобновить рассылку, нажмите /start или добавьте новую компанию.", 
+        "🔕 <b>Розсилка відключена.</b>\n"
+        "Ваш список компаній збережений. Ви можете перевіряти його вручну за командою /check.\n"
+        "Для відновлення розсилки, натисніть /start або додайте нову компанію.", 
         parse_mode='HTML'
     )
 
 async def my_companies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     codes = db_get_user_subscriptions(update.effective_chat.id)
     if not codes:
-        await update.message.reply_text("📭 Ваш список пуст.")
+        await update.message.reply_text("📭 Ваш список порожній.")
         return
     text = f"📋 <b>Ваш список ({len(codes)} шт):</b>\n" + "\n".join(f"• <code>{c}</code>" for c in codes)
     await update.message.reply_text(text, parse_mode='HTML')
@@ -329,19 +329,19 @@ async def clear_history_command(update: Update, context: ContextTypes.DEFAULT_TY
     with sqlite3.connect(DB_FILE) as conn:
         # Удаляем историю только для этого юзера
         conn.execute("DELETE FROM sent_history WHERE chat_id = ?", (chat_id,))
-    await update.message.reply_text("🧹 Ваша история просмотров очищена.")
+    await update.message.reply_text("🧹 Ваша історія переглядів очищена.")
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Проверяю ваш список...")
+    await update.message.reply_text("🔍 Перевіряю ваш список...")
     items, msg = await asyncio.to_thread(check_user_subscriptions, update.effective_chat.id, save_history=True)
     
     if not items:
         # Если список пуст, это может быть потому что нет подписок
         if msg != "OK": await update.message.reply_text(f"ℹ️ {msg}")
-        else: await update.message.reply_text("✅ По вашим компаниям новых банкротств нет.")
+        else: await update.message.reply_text("✅ По вашому списку нових банкрутств немає.")
         return
 
-    text = f"🚨 <b>НОВЫЕ СОБЫТИЯ ({len(items)}):</b>\n\n"
+    text = f"🚨 <b>НОВІ ПОДІЇ ({len(items)}):</b>\n\n"
     for i, item in enumerate(items, 1):
         safe_name = html.escape(item['name'])
         text += f"{i}. 🆔 <b>{item['code']}</b>\n🏢 {safe_name}\n📅 {item['date']}\n\n"
@@ -351,7 +351,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def find_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Глобальный поиск по базе (без привязки к пользователю)."""
     if not context.args:
-        await update.message.reply_text("Пример: `/find 30991664`", parse_mode='Markdown')
+        await update.message.reply_text("Приклад: `/find 30991664`", parse_mode='Markdown')
         return
     code = context.args[0].strip()
     
@@ -359,8 +359,8 @@ async def find_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not os.path.exists(DB_FILE): return "База не скачана."
         with sqlite3.connect(DB_FILE) as conn:
             rows = conn.execute("SELECT firm_name, date FROM bankrupts WHERE firm_edrpou = ?", (c,)).fetchall()
-        if not rows: return f"✅ По коду {c} ничего не найдено."
-        res = f"🔎 <b>Результаты по {c}:</b>\n"
+        if not rows: return f"✅ По коду {c} нічого не знайдено."
+        res = f"🔎 <b>Результати по {c}:</b>\n"
         for n, d in rows: 
             safe_n = html.escape(n)
             res += f"\n- {safe_n} ({d})"
@@ -371,10 +371,10 @@ async def find_one(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def manual_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обновляет базу и запускает проверку для текущего юзера."""
-    await update.message.reply_text("⏳ Обновляю общую базу...")
+    await update.message.reply_text("⏳ Оновлюю загальну базу...")
     res, msg = await asyncio.to_thread(update_database_logic)
     if res:
-        await update.message.reply_text("✅ База обновлена. Проверяю ваши подписки...")
+        await update.message.reply_text("✅ База оновлена. Перевіряю ваші підписки...")
         await check_command(update, context)
     else:
         await update.message.reply_text(f"❌ {msg}")
@@ -403,7 +403,7 @@ async def daily_routine(context: ContextTypes.DEFAULT_TYPE):
             
             message = None
             if items:
-                message = f"🚨 <b>СВЕЖИЕ БАНКРОТСТВА ({len(items)}):</b>\n\n"
+                message = f"🚨 <b>НОВІ БАНКРУТСТВА ({len(items)}):</b>\n\n"
                 for i, item in enumerate(items, 1):
                     safe_name = html.escape(item['name'])
                     message += f"{i}. 🆔 <b>{item['code']}</b>\n🏢 {safe_name}\n📅 {item['date']}\n\n"
