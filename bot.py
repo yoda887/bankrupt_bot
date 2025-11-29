@@ -7,6 +7,7 @@ import pytz
 import asyncio
 import sqlite3
 import html
+import time
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, 
@@ -94,10 +95,11 @@ def init_db():
 def update_database_logic():
     """Скачивает CSV и обновляет общую таблицу bankrupts."""
     logging.info("Начало скачивания базы...")
-    
+
+    # 1. Получаем ссылку на файл
     try:
         api_url = 'https://data.gov.ua/api/3/action/package_show?id=544d4dad-0b6d-4972-b0b8-fb266829770f'
-        resp = requests.get(api_url, timeout=10).json()
+        resp = requests.get(api_url, timeout=15).json()
         if resp.get('success'):
             resource_url = resp['result']['resources'][-1]['url']
         else:
@@ -106,13 +108,31 @@ def update_database_logic():
         return False, f"Ошибка API: {e}"
 
     csv_file = "temp_bankrupt.csv"
-    try:
-        r = requests.get(resource_url, stream=True, timeout=120)
-        with open(csv_file, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                f.write(chunk)
-    except Exception as e:
-        return False, f"Ошибка скачивания: {e}"
+    download_success = False
+    last_error = ""
+
+    # 2. Попытка скачивания с повторами (Retries)
+    for attempt in range(1, 4): # 3 попытки
+        try:
+            logging.info(f"⬇️ Попытка скачивания {attempt}/3...")
+            with requests.get(resource_url, stream=True, timeout=180) as r:
+                r.raise_for_status() # Проверка на ошибки 404, 500 и т.д.
+                with open(csv_file, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+            download_success = True
+            logging.info("✅ Файл успешно скачан.")
+            break # Выход из цикла, если успешно
+        except Exception as e:
+            last_error = str(e)
+            logging.warning(f"⚠️ Ошибка при скачивании (попытка {attempt}): {e}")
+            if os.path.exists(csv_file): 
+                os.remove(csv_file) # Удаляем битый файл
+            time.sleep(10) # Ждем 10 секунд перед следующей попыткой
+
+    if not download_success:
+        return False, f"Не удалось скачать файл после 3 попыток. Последняя ошибка: {last_error}"
 
     try:
         df = pd.read_csv(csv_file, sep=None, engine="python", on_bad_lines="skip", encoding="utf-8", encoding_errors='replace')
