@@ -11,7 +11,7 @@ import time
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, 
-    ContextTypes, 
+    ContextTypes, logging.basicConfig
     CommandHandler, 
     ConversationHandler, 
     MessageHandler, 
@@ -23,10 +23,14 @@ from dotenv import load_dotenv
 load_dotenv()
 TOKEN = os.getenv('BOT_TOKEN')
 
-# Настройка логирования
+# Настройка логирования (ФАЙЛ + КОНСОЛЬ)
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler("bot.log", encoding='utf-8'), # Логи в файл
+        logging.StreamHandler()          # Логи в консоль
+    ]
 )
 
 # Настройки
