@@ -11,7 +11,7 @@ import time
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, 
-    ContextTypes, logging.basicConfig
+    ContextTypes, 
     CommandHandler, 
     ConversationHandler, 
     MessageHandler, 
