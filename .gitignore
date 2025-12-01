@@ -207,3 +207,9 @@ marimo/_lsp/
 __marimo__/
 
 companies.txt
+
+# Database of the bot
+bankrupt.db
+
+# Temporary download files
+temp_bankrupt.csv
