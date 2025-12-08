@@ -547,7 +547,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("check", check_command))
     app.add_handler(CommandHandler("update", manual_update))
     app.add_handler(CommandHandler("clear_history", clear_history_command))
-     #app.add_handler(CommandHandler("import_txt", import_txt_command)) # <-- Новая команда
+    app.add_handler(CommandHandler("import_txt", import_txt_command)) # <-- Новая команда
     
     # 1. Диалог для поиска (/find)
     find_handler = ConversationHandler(
