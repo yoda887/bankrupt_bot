@@ -178,61 +178,85 @@ def update_database_logic():
         if os.path.exists(csv_file): os.remove(csv_file)
 
 def update_sanctions_logic():
-    """Завантажує JSON-дані санкцій через API РНБО та оновлює загальну таблицю sanctions."""
-    logging.info("Початок оновлення бази санкцій (через JSON API)...")
+    """Завантажує CSV-файли санкцій з маскуванням під браузер та оновлює таблицю."""
+    logging.info("Початок оновлення бази санкцій (через прямі CSV посилання)...")
     
-    # Прямі офіційні ендпоінти API РНБО (замість завантаження CSV файлів)
+    # Прямі посилання на скачування CSV для юридичних та фізичних осіб
     urls = [
-        "https://api-drs.nsdc.gov.ua/v2/subjects?subjectType=legal",
-        "https://api-drs.nsdc.gov.ua/v2/subjects?subjectType=individual"
+        "https://drs.nsdc.gov.ua/registry-api/subjects/export/legal/csv?lang=uk",
+        "https://drs.nsdc.gov.ua/registry-api/subjects/export/individual/csv?lang=uk"
     ]
     
+    # Створюємо сесію (зберігає cookies, працює як справжній браузер)
+    session = requests.Session()
+    
+    # Максимально маскуємося під звичайний Google Chrome для обходу захисту
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language": "uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7,ru;q=0.6",
+        "Referer": "https://drs.nsdc.gov.ua/", 
+        "Connection": "keep-alive",
+        "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-site",
+        "Upgrade-Insecure-Requests": "1"
+    })
+
     all_data = []
-    headers = {"Accept": "application/json"}
     
     for url in urls:
+        csv_file = f"temp_sanctions_{urls.index(url)}.csv"
         try:
-            # Робимо запит до API
-            response = requests.get(url, headers=headers, timeout=180)
+            logging.info(f"Завантажуємо CSV: {url}")
+            response = session.get(url, stream=True, timeout=180)
+            
             if response.status_code == 200:
-                data = response.json()
+                with open(csv_file, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
                 
-                # Проходимося по кожному запису (суб'єкту)
-                for item in data:
-                    sid = item.get("sid")
-                    name = item.get("name", "Назва не вказана")
-                    status = item.get("status", "unknown")
-                    
-                    # Витягуємо всі ідентифікатори (ЄДРПОУ, ІПН тощо) з масиву
-                    identifiers = item.get("identifiers", [])
-                    # Об'єднуємо всі ID в один рядок через пробіл для швидкого пошуку
-                    all_ids = " ".join([str(ident.get("id", "")) for ident in identifiers])
-                    
-                    all_data.append({
-                        "sid": sid,
-                        "name": name,
-                        "status": status,
-                        "reg_id": all_ids, # Записуємо всі коди в одну колонку
-                        "tax_id": ""       # Лишаємо пустим для сумісності з таблицею
-                    })
+                # Читаємо завантажений CSV (використовуємо dtype=str, щоб коди не губили нулі на початку)
+                df = pd.read_csv(csv_file, sep=',', encoding='utf-8', on_bad_lines="skip", dtype=str)
+                
+                # Вибираємо тільки потрібні колонки (згідно зі структурою РНБО)
+                cols_to_keep = ['sid', 'name', 'status', 'reg_id', 'tax_id']
+                existing_cols = [c for c in cols_to_keep if c in df.columns]
+                
+                df_filtered = df[existing_cols].copy()
+                all_data.append(df_filtered)
+                logging.info(f"Успішно оброблено файл (рядків: {len(df_filtered)})")
+            else:
+                logging.error(f"Сервер відхилив запит! Код: {response.status_code}. Текст: {response.text[:100]}")
+                
         except Exception as e:
-            logging.error(f"Помилка завантаження санкцій {url}: {e}")
+            logging.error(f"Помилка завантаження/парсингу {url}: {e}")
+        finally:
+            # Видаляємо тимчасовий файл після обробки
+            if os.path.exists(csv_file): 
+                os.remove(csv_file)
             
     if not all_data:
-        return False, "Не вдалося завантажити дані санкцій з API."
+        return False, "Не вдалося завантажити жоден CSV-файл санкцій. Можливо, спрацював захист сервера."
         
     try:
-        # Створюємо таблицю за допомогою pandas та зберігаємо в базу
-        df = pd.DataFrame(all_data)
+        # Зліплюємо таблиці юр. та фіз. осіб в одну
+        final_df = pd.concat(all_data, ignore_index=True)
+        final_df.fillna('', inplace=True) # Заміна NaN на пусті строки для безпечного пошуку
         
+        # Зберігаємо в базу даних
         with sqlite3.connect(DB_FILE) as conn:
-            df.to_sql('sanctions', conn, if_exists='replace', index=False)
+            final_df.to_sql('sanctions', conn, if_exists='replace', index=False)
             
-        logging.info("База санкцій оновлена.")
-        return True, "База санкцій оновлена."
+        logging.info(f"База санкцій успішно оновлена. Всього записів: {len(final_df)}")
+        return True, f"База санкцій оновлена (записів: {len(final_df)})."
     except Exception as e:
-        logging.error(f"Помилка збереження санкцій: {e}")
-        return False, f"Помилка імпорту санкцій: {e}"
+        logging.error(f"Помилка збереження санкцій в БД: {e}")
+        return False, f"Помилка запису в БД: {e}"
 
 # --- ЛОГИКА: ПЕРСОНАЛЬНЫЙ ПОИСК ---
 
