@@ -89,6 +89,27 @@ def init_db():
                 PRIMARY KEY (chat_id, firm_edrpou, date)
             )
         """)
+
+        # 5. Таблиця санкцій
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sanctions (
+                sid INTEGER PRIMARY KEY,
+                name TEXT,
+                status TEXT,
+                reg_id TEXT,
+                tax_id TEXT
+            )
+        """)
+
+        # 6. Таблиця історії повідомлень про санкції (щоб не спамити щодня)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sent_history_sanctions (
+                chat_id INTEGER,
+                firm_edrpou TEXT,
+                sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, firm_edrpou)
+            )
+        """)
         
         # МИГРАЦИЯ
         cursor.execute("INSERT OR IGNORE INTO users (chat_id, is_active) SELECT DISTINCT chat_id, 1 FROM subscriptions")
@@ -156,6 +177,63 @@ def update_database_logic():
     finally:
         if os.path.exists(csv_file): os.remove(csv_file)
 
+def update_sanctions_logic():
+    """Завантажує JSON-дані санкцій через API РНБО та оновлює загальну таблицю sanctions."""
+    logging.info("Початок оновлення бази санкцій (через JSON API)...")
+    
+    # Прямі офіційні ендпоінти API РНБО (замість завантаження CSV файлів)
+    urls = [
+        "https://api-drs.nsdc.gov.ua/v2/subjects?subjectType=legal",
+        "https://api-drs.nsdc.gov.ua/v2/subjects?subjectType=individual"
+    ]
+    
+    all_data = []
+    headers = {"Accept": "application/json"}
+    
+    for url in urls:
+        try:
+            # Робимо запит до API
+            response = requests.get(url, headers=headers, timeout=180)
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Проходимося по кожному запису (суб'єкту)
+                for item in data:
+                    sid = item.get("sid")
+                    name = item.get("name", "Назва не вказана")
+                    status = item.get("status", "unknown")
+                    
+                    # Витягуємо всі ідентифікатори (ЄДРПОУ, ІПН тощо) з масиву
+                    identifiers = item.get("identifiers", [])
+                    # Об'єднуємо всі ID в один рядок через пробіл для швидкого пошуку
+                    all_ids = " ".join([str(ident.get("id", "")) for ident in identifiers])
+                    
+                    all_data.append({
+                        "sid": sid,
+                        "name": name,
+                        "status": status,
+                        "reg_id": all_ids, # Записуємо всі коди в одну колонку
+                        "tax_id": ""       # Лишаємо пустим для сумісності з таблицею
+                    })
+        except Exception as e:
+            logging.error(f"Помилка завантаження санкцій {url}: {e}")
+            
+    if not all_data:
+        return False, "Не вдалося завантажити дані санкцій з API."
+        
+    try:
+        # Створюємо таблицю за допомогою pandas та зберігаємо в базу
+        df = pd.DataFrame(all_data)
+        
+        with sqlite3.connect(DB_FILE) as conn:
+            df.to_sql('sanctions', conn, if_exists='replace', index=False)
+            
+        logging.info("База санкцій оновлена.")
+        return True, "База санкцій оновлена."
+    except Exception as e:
+        logging.error(f"Помилка збереження санкцій: {e}")
+        return False, f"Помилка імпорту санкцій: {e}"
+
 # --- ЛОГИКА: ПЕРСОНАЛЬНЫЙ ПОИСК ---
 
 def check_user_subscriptions(chat_id, save_history=True):
@@ -212,6 +290,50 @@ def check_user_subscriptions(chat_id, save_history=True):
             
     new_items.sort(key=lambda x: x["date_obj"])
     return new_items, "OK"
+
+def check_user_sanctions(chat_id, save_history=True):
+    """Перевіряє базу санкцій по підписках користувача."""
+    if not os.path.exists(DB_FILE): return []
+
+    new_sanctions = []
+    import re
+    
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        
+        user_codes = cursor.execute("SELECT firm_edrpou FROM subscriptions WHERE chat_id = ?", (chat_id,)).fetchall()
+        if not user_codes: return []
+
+        for (code,) in user_codes:
+            if save_history:
+                seen = cursor.execute("SELECT 1 FROM sent_history_sanctions WHERE chat_id = ? AND firm_edrpou = ?", (chat_id, code)).fetchone()
+                if seen: continue 
+                
+            # Пошук у полях reg_id та tax_id
+            matches = cursor.execute("""
+                SELECT name, status, reg_id, tax_id 
+                FROM sanctions 
+                WHERE reg_id LIKE ? OR tax_id LIKE ?
+            """, (f"%{code}%", f"%{code}%")).fetchall()
+            
+            for name, status, reg_id, tax_id in matches:
+                # Об'єднуємо поля для перевірки і шукаємо код як ОДНЕ ціле число
+                reg_str = str(reg_id) + " " + str(tax_id)
+                if re.search(r'\b' + re.escape(code) + r'\b', reg_str):
+                    new_sanctions.append({
+                        "code": code,
+                        "name": name,
+                        "status": status
+                    })
+                    
+                    if save_history:
+                        cursor.execute("INSERT OR IGNORE INTO sent_history_sanctions (chat_id, firm_edrpou) VALUES (?, ?)", (chat_id, code))
+                    break # Переходимо до наступного коду
+
+        if save_history and new_sanctions:
+            conn.commit()
+            
+    return new_sanctions
 
 # --- УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ И ПОДПИСКАМИ (SQL) ---
 
@@ -429,29 +551,39 @@ async def clear_history_command(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text("🧹 Ваша історія переглядів очищена.")
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Перевіряю ваш список...")
-    items, msg = await asyncio.to_thread(check_user_subscriptions, update.effective_chat.id, save_history=True)
+    await update.message.reply_text("🔍 Перевіряю ваш список на банкрутства та санкції...")
+    chat_id = update.effective_chat.id
     
-    if not items:
-        if msg != "OK": await update.message.reply_text(f"ℹ️ {msg}")
-        else: await update.message.reply_text("✅ По вашому списку нових банкрутств немає.")
+    b_items, b_msg = await asyncio.to_thread(check_user_subscriptions, chat_id, save_history=True)
+    s_items = await asyncio.to_thread(check_user_sanctions, chat_id, save_history=True)
+    
+    if not b_items and not s_items:
+        await update.message.reply_text("✅ По вашому списку нових подій немає.")
         return
 
-    text = f"🚨 <b>НОВІ ПОДІЇ ({len(items)}):</b>\n\n"
-    for i, item in enumerate(items, 1):
-        safe_name = html.escape(item['name'])
-        text += f"{i}. 🆔 <b>{item['code']}</b>\n🏢 {safe_name}\n📅 {item['date']}\n\n"
+    text = ""
+    if b_items:
+        text += f"🚨 <b>НОВІ БАНКРУТСТВА ({len(b_items)}):</b>\n\n"
+        for i, item in enumerate(b_items, 1):
+            text += f"{i}. 🆔 <b>{item['code']}</b>\n🏢 {html.escape(item['name'])}\n📅 {item['date']}\n\n"
+            
+    if s_items:
+        text += f"🛑 <b>НОВІ САНКЦІЇ РНБО ({len(s_items)}):</b>\n\n"
+        for i, item in enumerate(s_items, 1):
+            text += f"{i}. 🆔 <b>{item['code']}</b>\n🏢 {html.escape(item['name'])}\n⚠️ Статус: {item['status']}\n\n"
     
     await update.message.reply_text(text, parse_mode='HTML')
 
 async def manual_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Оновлюю загальну базу...")
-    res, msg = await asyncio.to_thread(update_database_logic)
-    if res:
-        await update.message.reply_text("✅ База оновлена. Перевіряю ваші підписки...")
+    await update.message.reply_text("⏳ Оновлюю бази даних (Банкрутства та Санкції)... Це може зайняти хвилину.")
+    b_res, b_msg = await asyncio.to_thread(update_database_logic)
+    s_res, s_msg = await asyncio.to_thread(update_sanctions_logic)
+    
+    if b_res or s_res:
+        await update.message.reply_text("✅ Бази оновлено. Перевіряю ваші підписки...")
         await check_command(update, context)
     else:
-        await update.message.reply_text(f"❌ {msg}")
+        await update.message.reply_text(f"❌ Помилка оновлення.\nБанкрутства: {b_msg}\nСанкції: {s_msg}")
 
 # --- ФУНКЦИИ ДЛЯ CONVERSATION HANDLER (/find) ---
 
@@ -463,26 +595,41 @@ async def find_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return FIND_WAITING_CODE
 
 async def find_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Шаг 2: Пользователь ввел код, бот ищет и отвечает."""
     code = update.message.text.strip()
     
-    # Логика поиска в БД
     def db_search(c):
+        res = ""
         if not os.path.exists(DB_FILE): return "База не скачана."
+        import re
         with sqlite3.connect(DB_FILE) as conn:
-            rows = conn.execute("SELECT firm_name, date FROM bankrupts WHERE firm_edrpou = ?", (c,)).fetchall()
-        if not rows: return f"✅ По коду {c} нічого не знайдено."
-        res = f"🔎 <b>Результати по {c}:</b>\n"
-        for n, d in rows: 
-            safe_n = html.escape(n)
-            res += f"\n- {safe_n} ({d})"
-        return res
+            # 1. Пошук банкрутств
+            b_rows = conn.execute("SELECT firm_name, date FROM bankrupts WHERE firm_edrpou = ?", (c,)).fetchall()
+            if b_rows:
+                res += f"🚨 <b>БАНКРУТСТВО:</b>\n"
+                for n, d in b_rows: 
+                    res += f"- {html.escape(n)} ({d})\n"
+            else:
+                res += "✅ В реєстрі банкрутств не знайдено.\n"
+                
+            # 2. Пошук санкцій
+            s_rows = conn.execute("SELECT name, status, reg_id, tax_id FROM sanctions WHERE reg_id LIKE ? OR tax_id LIKE ?", (f"%{c}%", f"%{c}%")).fetchall()
+            s_found = False
+            for name, status, reg_id, tax_id in s_rows:
+                reg_str = str(reg_id) + " " + str(tax_id)
+                if re.search(r'\b' + re.escape(c) + r'\b', reg_str):
+                    if not s_found:
+                        res += f"\n🛑 <b>САНКЦІЇ РНБО:</b>\n"
+                        s_found = True
+                    res += f"- {html.escape(name)} (Статус: {status})\n"
+                    
+            if not s_found:
+                res += "\n✅ В санкційних списках не знайдено.\n"
+                
+        return f"🔎 <b>Результати по коду {c}:</b>\n\n" + res
 
-    await update.message.reply_text("⏳ Шукаю...")
+    await update.message.reply_text("⏳ Шукаю в базах банкрутств та санкцій...")
     result = await asyncio.to_thread(db_search, code)
     await update.message.reply_text(result, parse_mode='HTML')
-    
-    # Завершаем разговор
     return ConversationHandler.END
 
 async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -495,31 +642,35 @@ async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def daily_routine(context: ContextTypes.DEFAULT_TYPE):
     logging.info("Start daily routine")
     
-    res, msg = await asyncio.to_thread(update_database_logic)
-    if not res:
-        try:
-            await context.bot.send_message(
-                ADMIN_CHAT_ID, 
-                f"⚠️ <b>Ошибка утреннего обновления!</b>\n{html.escape(msg)}", 
-                parse_mode='HTML'
-            )
-        except: pass
-        return
+    # 1. Оновлення баз
+    b_res, b_msg = await asyncio.to_thread(update_database_logic)
+    if not b_res: logging.error(f"Помилка банкрутств: {b_msg}")
+        
+    s_res, s_msg = await asyncio.to_thread(update_sanctions_logic)
+    if not s_res: logging.error(f"Помилка санкцій: {s_msg}")
 
     users = await asyncio.to_thread(db_get_active_users)
     is_monday = (datetime.datetime.now().weekday() == 0)
     
     for chat_id in users:
         try:
-            items, _ = await asyncio.to_thread(check_user_subscriptions, chat_id, save_history=True)
-            message = None
-            if items:
-                message = f"🚨 <b>НОВІ БАНКРУТСТВА ({len(items)}):</b>\n\n"
-                for i, item in enumerate(items, 1):
-                    safe_name = html.escape(item['name'])
-                    message += f"{i}. 🆔 <b>{item['code']}</b>\n🏢 {safe_name}\n📅 {item['date']}\n\n"
-            elif is_monday:
-                message = "👋 <b>Понедельник.</b>\nБот работает. По вашему списку компаний новых банкротств нет."
+            b_items, _ = await asyncio.to_thread(check_user_subscriptions, chat_id, save_history=True)
+            s_items = await asyncio.to_thread(check_user_sanctions, chat_id, save_history=True)
+            
+            message = ""
+            
+            if b_items:
+                message += f"🚨 <b>НОВІ БАНКРУТСТВА ({len(b_items)}):</b>\n\n"
+                for i, item in enumerate(b_items, 1):
+                    message += f"{i}. 🆔 <b>{item['code']}</b>\n🏢 {html.escape(item['name'])}\n📅 {item['date']}\n\n"
+                    
+            if s_items:
+                message += f"🛑 <b>НОВІ САНКЦІЇ РНБО ({len(s_items)}):</b>\n\n"
+                for i, item in enumerate(s_items, 1):
+                    message += f"{i}. 🆔 <b>{item['code']}</b>\n🏢 {html.escape(item['name'])}\n⚠️ Статус: {item['status']}\n\n"
+
+            if not message and is_monday:
+                message = "👋 <b>Понеділок.</b>\nБот працює. По вашому списку компаній нових подій немає."
             
             if message:
                 await context.bot.send_message(chat_id, message, parse_mode='HTML')
