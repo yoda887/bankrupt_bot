@@ -8,6 +8,7 @@ import asyncio
 import sqlite3
 import html
 import time
+import cloudscraper
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, 
@@ -178,33 +179,22 @@ def update_database_logic():
         if os.path.exists(csv_file): os.remove(csv_file)
 
 def update_sanctions_logic():
-    """Завантажує CSV-файли санкцій з маскуванням під браузер та оновлює таблицю."""
-    logging.info("Початок оновлення бази санкцій (через прямі CSV посилання)...")
+    """Завантажує CSV-файли санкцій з обходом Cloudflare та оновлює таблицю."""
+    logging.info("Початок оновлення бази санкцій (через cloudscraper)...")
     
-    # Прямі посилання на скачування CSV для юридичних та фізичних осіб
     urls = [
         "https://drs.nsdc.gov.ua/registry-api/subjects/export/legal/csv?lang=uk",
         "https://drs.nsdc.gov.ua/registry-api/subjects/export/individual/csv?lang=uk"
     ]
     
-    # Створюємо сесію (зберігає cookies, працює як справжній браузер)
-    session = requests.Session()
-    
-    # Максимально маскуємося під звичайний Google Chrome для обходу захисту
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Language": "uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7,ru;q=0.6",
-        "Referer": "https://drs.nsdc.gov.ua/", 
-        "Connection": "keep-alive",
-        "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "same-site",
-        "Upgrade-Insecure-Requests": "1"
-    })
+    # Створюємо скрапер для обходу Cloudflare
+    scraper = cloudscraper.create_scraper(
+        browser={
+            'browser': 'chrome',
+            'platform': 'windows',
+            'desktop': True
+        }
+    )
 
     all_data = []
     
@@ -212,7 +202,7 @@ def update_sanctions_logic():
         csv_file = f"temp_sanctions_{urls.index(url)}.csv"
         try:
             logging.info(f"Завантажуємо CSV: {url}")
-            response = session.get(url, stream=True, timeout=180)
+            response = scraper.get(url, stream=True, timeout=180)
             
             if response.status_code == 200:
                 with open(csv_file, 'wb') as f:
@@ -220,10 +210,7 @@ def update_sanctions_logic():
                         if chunk:
                             f.write(chunk)
                 
-                # Читаємо завантажений CSV (використовуємо dtype=str, щоб коди не губили нулі на початку)
                 df = pd.read_csv(csv_file, sep=',', encoding='utf-8', on_bad_lines="skip", dtype=str)
-                
-                # Вибираємо тільки потрібні колонки (згідно зі структурою РНБО)
                 cols_to_keep = ['sid', 'name', 'status', 'reg_id', 'tax_id']
                 existing_cols = [c for c in cols_to_keep if c in df.columns]
                 
@@ -236,19 +223,16 @@ def update_sanctions_logic():
         except Exception as e:
             logging.error(f"Помилка завантаження/парсингу {url}: {e}")
         finally:
-            # Видаляємо тимчасовий файл після обробки
             if os.path.exists(csv_file): 
                 os.remove(csv_file)
             
     if not all_data:
-        return False, "Не вдалося завантажити жоден CSV-файл санкцій. Можливо, спрацював захист сервера."
+        return False, "Не вдалося завантажити жоден CSV-файл санкцій. Можливо, спрацював жорсткий захист сервера."
         
     try:
-        # Зліплюємо таблиці юр. та фіз. осіб в одну
         final_df = pd.concat(all_data, ignore_index=True)
-        final_df.fillna('', inplace=True) # Заміна NaN на пусті строки для безпечного пошуку
+        final_df.fillna('', inplace=True)
         
-        # Зберігаємо в базу даних
         with sqlite3.connect(DB_FILE) as conn:
             final_df.to_sql('sanctions', conn, if_exists='replace', index=False)
             
