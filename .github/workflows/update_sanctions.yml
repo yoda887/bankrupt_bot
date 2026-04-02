@@ -24,6 +24,8 @@ jobs:
             -o sanctions_individual.csv \
             "https://drs.nsdc.gov.ua/registry-api/subjects/export/individual/csv?lang=uk"
 
+          echo "=== ПЕРШІ 3 РЯДКИ LEGAL ==="
+          head -3 sanctions_legal.csv
           echo "Legal rows: $(wc -l < sanctions_legal.csv)"
           echo "Individual rows: $(wc -l < sanctions_individual.csv)"
 
