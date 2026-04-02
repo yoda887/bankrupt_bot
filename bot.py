@@ -8,7 +8,7 @@ import asyncio
 import sqlite3
 import html
 import time
-import cloudscraper
+from curl_cffi import requests as curl_requests
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, 
@@ -179,38 +179,35 @@ def update_database_logic():
         if os.path.exists(csv_file): os.remove(csv_file)
 
 def update_sanctions_logic():
-    """Завантажує CSV-файли санкцій з обходом Cloudflare та оновлює таблицю."""
-    logging.info("Початок оновлення бази санкцій (через cloudscraper)...")
+    """Завантажує CSV-файли санкцій з потужним обходом Cloudflare (через curl_cffi) та оновлює таблицю."""
+    logging.info("Початок оновлення бази санкцій (через curl_cffi)...")
     
     urls = [
         "https://drs.nsdc.gov.ua/registry-api/subjects/export/legal/csv?lang=uk",
         "https://drs.nsdc.gov.ua/registry-api/subjects/export/individual/csv?lang=uk"
     ]
     
-    # Створюємо скрапер для обходу Cloudflare
-    scraper = cloudscraper.create_scraper(
-        browser={
-            'browser': 'chrome',
-            'platform': 'windows',
-            'desktop': True
-        }
-    )
-
     all_data = []
     
     for url in urls:
         csv_file = f"temp_sanctions_{urls.index(url)}.csv"
         try:
             logging.info(f"Завантажуємо CSV: {url}")
-            response = scraper.get(url, stream=True, timeout=180)
+            
+            # Використовуємо curl_requests, що ідеально імітує браузер Chrome
+            response = curl_requests.get(
+                url, 
+                impersonate="chrome120", # Прикидаємося Chrome 120
+                timeout=180
+            )
             
             if response.status_code == 200:
                 with open(csv_file, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
+                    f.write(response.content)
                 
+                # Читаємо завантажений CSV
                 df = pd.read_csv(csv_file, sep=',', encoding='utf-8', on_bad_lines="skip", dtype=str)
+                
                 cols_to_keep = ['sid', 'name', 'status', 'reg_id', 'tax_id']
                 existing_cols = [c for c in cols_to_keep if c in df.columns]
                 
