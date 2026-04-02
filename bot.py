@@ -198,10 +198,13 @@ def update_sanctions_logic():
             logging.info(f"Завантажуємо CSV через проксі: {target_url}")
             
             # Відправляємо запит до ScraperAPI, а він вже сам стукає до РНБО
+            # Відправляємо запит до ScraperAPI з преміум-налаштуваннями
             payload = {
                 'api_key': SCRAPER_API_KEY, 
                 'url': target_url, 
-                'keep_headers': 'true'
+                'keep_headers': 'true',
+                'premium': 'true',        # ВМИКАЄМО: резидентні (домашні) IP-адреси
+                'country_code': 'eu'      # ВМИКАЄМО: європейські/українські пули адрес
             }
             
             response = requests.get('http://api.scraperapi.com', params=payload, stream=True, timeout=300)
