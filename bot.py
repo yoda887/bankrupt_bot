@@ -8,7 +8,7 @@ import asyncio
 import sqlite3
 import html
 import time
-from curl_cffi import requests as curl_requests
+
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, 
@@ -179,8 +179,11 @@ def update_database_logic():
         if os.path.exists(csv_file): os.remove(csv_file)
 
 def update_sanctions_logic():
-    """Завантажує CSV-файли санкцій з потужним обходом Cloudflare (через curl_cffi) та оновлює таблицю."""
-    logging.info("Початок оновлення бази санкцій (через curl_cffi)...")
+    """Завантажує CSV-файли санкцій через ScraperAPI для обходу Cloudflare."""
+    logging.info("Початок оновлення бази санкцій (через ScraperAPI)...")
+    
+    # ВСТАВТЕ ВАШ КЛЮЧ SCRAPER API СЮДИ:
+    SCRAPER_API_KEY = "ВАШ_КЛЮЧ_З_САЙТУ_SCRAPERAPI"
     
     urls = [
         "https://drs.nsdc.gov.ua/registry-api/subjects/export/legal/csv?lang=uk",
@@ -189,21 +192,25 @@ def update_sanctions_logic():
     
     all_data = []
     
-    for url in urls:
-        csv_file = f"temp_sanctions_{urls.index(url)}.csv"
+    for target_url in urls:
+        csv_file = f"temp_sanctions_{urls.index(target_url)}.csv"
         try:
-            logging.info(f"Завантажуємо CSV: {url}")
+            logging.info(f"Завантажуємо CSV через проксі: {target_url}")
             
-            # Використовуємо curl_requests, що ідеально імітує браузер Chrome
-            response = curl_requests.get(
-                url, 
-                impersonate="chrome120", # Прикидаємося Chrome 120
-                timeout=180
-            )
+            # Відправляємо запит до ScraperAPI, а він вже сам стукає до РНБО
+            payload = {
+                'api_key': SCRAPER_API_KEY, 
+                'url': target_url, 
+                'keep_headers': 'true'
+            }
+            
+            response = requests.get('http://api.scraperapi.com', params=payload, stream=True, timeout=300)
             
             if response.status_code == 200:
                 with open(csv_file, 'wb') as f:
-                    f.write(response.content)
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
                 
                 # Читаємо завантажений CSV
                 df = pd.read_csv(csv_file, sep=',', encoding='utf-8', on_bad_lines="skip", dtype=str)
@@ -215,16 +222,16 @@ def update_sanctions_logic():
                 all_data.append(df_filtered)
                 logging.info(f"Успішно оброблено файл (рядків: {len(df_filtered)})")
             else:
-                logging.error(f"Сервер відхилив запит! Код: {response.status_code}. Текст: {response.text[:100]}")
+                logging.error(f"Помилка ScraperAPI! Код: {response.status_code}. Текст: {response.text[:100]}")
                 
         except Exception as e:
-            logging.error(f"Помилка завантаження/парсингу {url}: {e}")
+            logging.error(f"Помилка завантаження {target_url}: {e}")
         finally:
             if os.path.exists(csv_file): 
                 os.remove(csv_file)
             
     if not all_data:
-        return False, "Не вдалося завантажити жоден CSV-файл санкцій. Можливо, спрацював жорсткий захист сервера."
+        return False, "Не вдалося завантажити санкції. Перевірте ліміти ScraperAPI або логи."
         
     try:
         final_df = pd.concat(all_data, ignore_index=True)
