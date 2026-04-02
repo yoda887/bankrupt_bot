@@ -8,6 +8,7 @@ import asyncio
 import sqlite3
 import html
 import time
+import urllib3
 
 from telegram import Update
 from telegram.ext import (
@@ -19,6 +20,8 @@ from telegram.ext import (
     filters
 )
 from dotenv import load_dotenv
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- КОНФИГУРАЦИЯ ---
 load_dotenv()
@@ -179,8 +182,8 @@ def update_database_logic():
         if os.path.exists(csv_file): os.remove(csv_file)
 
 def update_sanctions_logic():
-    """Завантажує CSV-файли санкцій через ScraperAPI для обходу Cloudflare."""
-    logging.info("Початок оновлення бази санкцій (через ScraperAPI)...")
+    """Завантажує CSV-файли санкцій через ScraperAPI у режимі PROXY."""
+    logging.info("Початок оновлення бази санкцій (через ScraperAPI Proxy Mode)...")
     
     # ВСТАВТЕ ВАШ КЛЮЧ SCRAPER API СЮДИ:
     SCRAPER_API_KEY = "997574aa931452b215d42368a1bbbb82"
@@ -190,24 +193,28 @@ def update_sanctions_logic():
         "https://drs.nsdc.gov.ua/registry-api/subjects/export/individual/csv?lang=uk"
     ]
     
+    # Формуємо URL для проксі: преміум + резидентні IP + Україна
+    proxy_url = f"http://scraperapi.premium=true.country_code=ua:{SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001"
+    proxies = {
+        "http": proxy_url,
+        "https": proxy_url
+    }
+    
     all_data = []
     
     for target_url in urls:
         csv_file = f"temp_sanctions_{urls.index(target_url)}.csv"
         try:
-            logging.info(f"Завантажуємо CSV через проксі: {target_url}")
+            logging.info(f"Завантажуємо CSV через Proxy: {target_url}")
             
-            # Відправляємо запит до ScraperAPI, а він вже сам стукає до РНБО
-            # Відправляємо запит до ScraperAPI з преміум-налаштуваннями
-            payload = {
-                'api_key': SCRAPER_API_KEY, 
-                'url': target_url, 
-                'keep_headers': 'true',
-                'premium': 'true',        # ВМИКАЄМО: резидентні (домашні) IP-адреси
-                'country_code': 'eu'      # ВМИКАЄМО: європейські/українські пули адрес
-            }
-            
-            response = requests.get('http://api.scraperapi.com', params=payload, stream=True, timeout=300)
+            # Робимо прямий запит, але трафік йде через проксі-сервер ScraperAPI
+            response = requests.get(
+                target_url, 
+                proxies=proxies, 
+                stream=True, 
+                timeout=180, 
+                verify=False # Вимикаємо перевірку сертифіката для проксі
+            )
             
             if response.status_code == 200:
                 with open(csv_file, 'wb') as f:
@@ -217,7 +224,6 @@ def update_sanctions_logic():
                 
                 # Читаємо завантажений CSV
                 df = pd.read_csv(csv_file, sep=',', encoding='utf-8', on_bad_lines="skip", dtype=str)
-                
                 cols_to_keep = ['sid', 'name', 'status', 'reg_id', 'tax_id']
                 existing_cols = [c for c in cols_to_keep if c in df.columns]
                 
@@ -225,7 +231,7 @@ def update_sanctions_logic():
                 all_data.append(df_filtered)
                 logging.info(f"Успішно оброблено файл (рядків: {len(df_filtered)})")
             else:
-                logging.error(f"Помилка ScraperAPI! Код: {response.status_code}. Текст: {response.text[:100]}")
+                logging.error(f"Помилка сервера/Проксі! Код: {response.status_code}. Текст: {response.text[:100]}")
                 
         except Exception as e:
             logging.error(f"Помилка завантаження {target_url}: {e}")
@@ -234,7 +240,7 @@ def update_sanctions_logic():
                 os.remove(csv_file)
             
     if not all_data:
-        return False, "Не вдалося завантажити санкції. Перевірте ліміти ScraperAPI або логи."
+        return False, "Не вдалося завантажити санкції. Ймовірно, РНБО заблокував IP-адресу проксі."
         
     try:
         final_df = pd.concat(all_data, ignore_index=True)
