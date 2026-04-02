@@ -3,3 +3,4 @@ pandas
 requests
 apscheduler
 python-dotenv
+cloudscraper==1.2.71
