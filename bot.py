@@ -183,7 +183,7 @@ def update_sanctions_logic():
     logging.info("Початок оновлення бази санкцій (через ScraperAPI)...")
     
     # ВСТАВТЕ ВАШ КЛЮЧ SCRAPER API СЮДИ:
-    SCRAPER_API_KEY = "ВАШ_КЛЮЧ_З_САЙТУ_SCRAPERAPI"
+    SCRAPER_API_KEY = "997574aa931452b215d42368a1bbbb82"
     
     urls = [
         "https://drs.nsdc.gov.ua/registry-api/subjects/export/legal/csv?lang=uk",
