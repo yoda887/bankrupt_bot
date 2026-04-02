@@ -182,39 +182,34 @@ def update_database_logic():
         if os.path.exists(csv_file): os.remove(csv_file)
 
 def update_sanctions_logic():
-    """Завантажує CSV-файли санкцій через ScraperAPI у режимі PROXY."""
-    logging.info("Початок оновлення бази санкцій (через ScraperAPI Proxy Mode)...")
-    
-    # ВСТАВТЕ ВАШ КЛЮЧ SCRAPER API СЮДИ:
-    SCRAPER_API_KEY = "997574aa931452b215d42368a1bbbb82"
+    """Завантажує CSV-файли санкцій з маскуванням під браузер та оновлює таблицю."""
+    logging.info("Початок оновлення бази санкцій (пряме завантаження)...")
     
     urls = [
         "https://drs.nsdc.gov.ua/registry-api/subjects/export/legal/csv?lang=uk",
         "https://drs.nsdc.gov.ua/registry-api/subjects/export/individual/csv?lang=uk"
     ]
     
-    # Формуємо URL для проксі: преміум + резидентні IP + Україна
-    proxy_url = f"http://scraperapi.premium=true.country_code=ua:{SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001"
-    proxies = {
-        "http": proxy_url,
-        "https": proxy_url
-    }
+    # Створюємо сесію (зберігає cookies, як справжній браузер)
+    session = requests.Session()
     
+    # Максимально маскуємося під звичайний Google Chrome
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": "https://drs.nsdc.gov.ua/", 
+        "Connection": "keep-alive"
+    })
+
     all_data = []
     
-    for target_url in urls:
-        csv_file = f"temp_sanctions_{urls.index(target_url)}.csv"
+    for url in urls:
+        csv_file = f"temp_sanctions_{urls.index(url)}.csv"
         try:
-            logging.info(f"Завантажуємо CSV через Proxy: {target_url}")
-            
-            # Робимо прямий запит, але трафік йде через проксі-сервер ScraperAPI
-            response = requests.get(
-                target_url, 
-                proxies=proxies, 
-                stream=True, 
-                timeout=180, 
-                verify=False # Вимикаємо перевірку сертифіката для проксі
-            )
+            logging.info(f"Завантажуємо CSV: {url}")
+            # Звичайний запит через сесію
+            response = session.get(url, stream=True, timeout=180)
             
             if response.status_code == 200:
                 with open(csv_file, 'wb') as f:
@@ -222,8 +217,10 @@ def update_sanctions_logic():
                         if chunk:
                             f.write(chunk)
                 
-                # Читаємо завантажений CSV
+                # Читаємо завантажений CSV (використовуємо dtype=str, щоб коди не губили нулі)
                 df = pd.read_csv(csv_file, sep=',', encoding='utf-8', on_bad_lines="skip", dtype=str)
+                
+                # Вибираємо тільки потрібні колонки 
                 cols_to_keep = ['sid', 'name', 'status', 'reg_id', 'tax_id']
                 existing_cols = [c for c in cols_to_keep if c in df.columns]
                 
@@ -231,21 +228,24 @@ def update_sanctions_logic():
                 all_data.append(df_filtered)
                 logging.info(f"Успішно оброблено файл (рядків: {len(df_filtered)})")
             else:
-                logging.error(f"Помилка сервера/Проксі! Код: {response.status_code}. Текст: {response.text[:100]}")
+                logging.error(f"Сервер відхилив запит! Код: {response.status_code}. Текст: {response.text[:100]}")
                 
         except Exception as e:
-            logging.error(f"Помилка завантаження {target_url}: {e}")
+            logging.error(f"Помилка завантаження/парсингу {url}: {e}")
         finally:
+            # Видаляємо тимчасовий файл після обробки
             if os.path.exists(csv_file): 
                 os.remove(csv_file)
             
     if not all_data:
-        return False, "Не вдалося завантажити санкції. Ймовірно, РНБО заблокував IP-адресу проксі."
+        return False, "Не вдалося завантажити жоден CSV-файл санкцій."
         
     try:
+        # Зліплюємо таблиці юр. та фіз. осіб в одну
         final_df = pd.concat(all_data, ignore_index=True)
-        final_df.fillna('', inplace=True)
+        final_df.fillna('', inplace=True) # Заміна NaN на пусті строки
         
+        # Зберігаємо в базу даних
         with sqlite3.connect(DB_FILE) as conn:
             final_df.to_sql('sanctions', conn, if_exists='replace', index=False)
             
