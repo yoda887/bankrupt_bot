@@ -182,77 +182,46 @@ def update_database_logic():
         if os.path.exists(csv_file): os.remove(csv_file)
 
 def update_sanctions_logic():
-    """Завантажує CSV-файли санкцій з маскуванням під браузер та оновлює таблицю."""
-    logging.info("Початок оновлення бази санкцій (пряме завантаження)...")
-    
-    urls = [
-        "https://drs.nsdc.gov.ua/registry-api/subjects/export/legal/csv?lang=uk",
-        "https://drs.nsdc.gov.ua/registry-api/subjects/export/individual/csv?lang=uk"
+    """Читає локальні CSV-файли санкцій (скачані GitHub Actions) та оновлює таблицю."""
+    logging.info("Початок оновлення бази санкцій (з локальних CSV файлів)...")
+
+    csv_files = [
+        "sanctions_legal.csv",
+        "sanctions_individual.csv"
     ]
-    
-    # Створюємо сесію (зберігає cookies, як справжній браузер)
-    session = requests.Session()
-    
-    # Максимально маскуємося під звичайний Google Chrome
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://drs.nsdc.gov.ua/", 
-        "Connection": "keep-alive"
-    })
 
     all_data = []
-    
-    for url in urls:
-        csv_file = f"temp_sanctions_{urls.index(url)}.csv"
+
+    for csv_file in csv_files:
+        if not os.path.exists(csv_file):
+            logging.warning(f"Файл {csv_file} не знайдено. Пропускаємо.")
+            continue
         try:
-            logging.info(f"Завантажуємо CSV: {url}")
-            # Звичайний запит через сесію
-            response = session.get(url, stream=True, timeout=180)
-            
-            if response.status_code == 200:
-                with open(csv_file, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                
-                # Читаємо завантажений CSV (використовуємо dtype=str, щоб коди не губили нулі)
-                df = pd.read_csv(csv_file, sep=',', encoding='utf-8', on_bad_lines="skip", dtype=str)
-                
-                # Вибираємо тільки потрібні колонки 
-                cols_to_keep = ['sid', 'name', 'status', 'reg_id', 'tax_id']
-                existing_cols = [c for c in cols_to_keep if c in df.columns]
-                
-                df_filtered = df[existing_cols].copy()
-                all_data.append(df_filtered)
-                logging.info(f"Успішно оброблено файл (рядків: {len(df_filtered)})")
-            else:
-                logging.error(f"Сервер відхилив запит! Код: {response.status_code}. Текст: {response.text[:100]}")
-                
+            df = pd.read_csv(csv_file, sep=',', encoding='utf-8',
+                             on_bad_lines="skip", dtype=str)
+
+            cols_to_keep = ['sid', 'name', 'status', 'reg_id', 'tax_id']
+            existing_cols = [c for c in cols_to_keep if c in df.columns]
+            df_filtered = df[existing_cols].copy()
+            all_data.append(df_filtered)
+            logging.info(f"Оброблено {csv_file}: {len(df_filtered)} записів")
         except Exception as e:
-            logging.error(f"Помилка завантаження/парсингу {url}: {e}")
-        finally:
-            # Видаляємо тимчасовий файл після обробки
-            if os.path.exists(csv_file): 
-                os.remove(csv_file)
-            
+            logging.error(f"Помилка читання {csv_file}: {e}")
+
     if not all_data:
-        return False, "Не вдалося завантажити жоден CSV-файл санкцій."
-        
+        return False, "CSV файли санкцій не знайдено. GitHub Actions ще не скачав їх."
+
     try:
-        # Зліплюємо таблиці юр. та фіз. осіб в одну
         final_df = pd.concat(all_data, ignore_index=True)
-        final_df.fillna('', inplace=True) # Заміна NaN на пусті строки
-        
-        # Зберігаємо в базу даних
+        final_df.fillna('', inplace=True)
+
         with sqlite3.connect(DB_FILE) as conn:
             final_df.to_sql('sanctions', conn, if_exists='replace', index=False)
-            
-        logging.info(f"База санкцій успішно оновлена. Всього записів: {len(final_df)}")
+
+        logging.info(f"База санкцій оновлена. Всього записів: {len(final_df)}")
         return True, f"База санкцій оновлена (записів: {len(final_df)})."
     except Exception as e:
-        logging.error(f"Помилка збереження санкцій в БД: {e}")
+        logging.error(f"Помилка збереження санкцій: {e}")
         return False, f"Помилка запису в БД: {e}"
 
 # --- ЛОГИКА: ПЕРСОНАЛЬНЫЙ ПОИСК ---
