@@ -3,4 +3,3 @@ pandas
 requests
 apscheduler
 python-dotenv
-curl_cffi==0.7.4
