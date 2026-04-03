@@ -182,7 +182,6 @@ def update_database_logic():
         if os.path.exists(csv_file): os.remove(csv_file)
 
 def update_sanctions_logic():
-    """Читає локальні CSV-файли санкцій (скачані GitHub Actions) та оновлює таблицю."""
     logging.info("Початок оновлення бази санкцій (з локальних CSV файлів)...")
 
     csv_files = [
@@ -199,7 +198,6 @@ def update_sanctions_logic():
         try:
             df = pd.read_csv(csv_file, sep=',', encoding='utf-8',
                              on_bad_lines="skip", dtype=str)
-
             cols_to_keep = ['sid', 'name', 'status', 'reg_id', 'tax_id']
             existing_cols = [c for c in cols_to_keep if c in df.columns]
             df_filtered = df[existing_cols].copy()
@@ -209,7 +207,7 @@ def update_sanctions_logic():
             logging.error(f"Помилка читання {csv_file}: {e}")
 
     if not all_data:
-        return False, "CSV файли санкцій не знайдено. GitHub Actions ще не скачав їх."
+        return False, "CSV файли санкцій не знайдено на сервері."
 
     try:
         final_df = pd.concat(all_data, ignore_index=True)
