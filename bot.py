@@ -196,11 +196,25 @@ def update_sanctions_logic():
             logging.warning(f"Файл {csv_file} не знайдено. Пропускаємо.")
             continue
         try:
-            df = pd.read_csv(csv_file, sep=',', encoding='utf-8',
-                             on_bad_lines="skip", dtype=str)
+            df = pd.read_csv(
+                csv_file,
+                sep='\t',            # ТАБУЛЯЦІЯ, не кома!
+                encoding='utf-8',
+                on_bad_lines="skip",
+                dtype=str
+            )
+
+            logging.info(f"Колонки в {csv_file}: {list(df.columns)}")
+
+            # Беремо тільки потрібні колонки
             cols_to_keep = ['sid', 'name', 'status', 'reg_id', 'tax_id']
             existing_cols = [c for c in cols_to_keep if c in df.columns]
             df_filtered = df[existing_cols].copy()
+
+            # Очищаємо назви колонок від спецсимволів
+            df_filtered.columns = [c.strip().replace(' ', '_').replace('(', '').replace(')', '') 
+                                   for c in df_filtered.columns]
+
             all_data.append(df_filtered)
             logging.info(f"Оброблено {csv_file}: {len(df_filtered)} записів")
         except Exception as e:
