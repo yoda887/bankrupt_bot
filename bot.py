@@ -247,6 +247,41 @@ def update_sanctions_logic():
         logging.error(f"Помилка збереження санкцій: {e}")
         return False, f"Помилка запису в БД: {e}"
 
+def check_sanctions_file_age():
+    """Перевіряє скільки днів тому оновлювались файли санкцій."""
+    files = ["sanctions_legal.csv", "sanctions_individual.csv"]
+    oldest_days = 0
+    for f in files:
+        if not os.path.exists(f):
+            return 999
+        age_days = (datetime.datetime.now().timestamp() - os.path.getmtime(f)) / 86400
+        oldest_days = max(oldest_days, age_days)
+    return int(oldest_days)
+async def sanctions_reminder(context: ContextTypes.DEFAULT_TYPE):
+    """Щомісячне нагадування адміну оновити санкційні списки."""
+    age_days = await asyncio.to_thread(check_sanctions_file_age)
+    
+    if age_days >= 30:
+        message = (
+            f"⚠️ <b>Нагадування!</b>\n\n"
+            f"Санкційні списки РНБО не оновлювались <b>{age_days} днів</b>.\n\n"
+            f"Будь ласка, оновіть файли:\n\n"
+            f"1️⃣ Скачайте CSV з сайту:\n"
+            f"<code>https://drs.nsdc.gov.ua/export/subjects</code>\n\n"
+            f"2️⃣ Завантажте на сервер (PowerShell):\n"
+            f"<code>scp sanctions_legal.csv root@94.130.111.231:/root/bankrupt_bot/</code>\n"
+            f"<code>scp sanctions_individual.csv root@94.130.111.231:/root/bankrupt_bot/</code>\n\n"
+            f"3️⃣ Відправте боту команду:\n"
+            f"<code>/update</code>"
+        )
+        await context.bot.send_message(
+            ADMIN_CHAT_ID,
+            message,
+            parse_mode='HTML'
+        )
+        logging.info(f"Надіслано нагадування: файли санкцій {age_days} днів не оновлювались")
+
+
 # --- ЛОГИКА: ПЕРСОНАЛЬНЫЙ ПОИСК ---
 
 def check_user_subscriptions(chat_id, save_history=True):
@@ -730,6 +765,7 @@ if __name__ == '__main__':
     jq = app.job_queue
     kyiv_tz = pytz.timezone('Europe/Kiev')
     jq.run_daily(daily_routine, time=datetime.time(hour=9, minute=0, tzinfo=kyiv_tz))
+    jq.run_daily(sanctions_reminder, time=datetime.time(hour=10, minute=0, tzinfo=kyiv_tz))
     
     # Обычные команды
     app.add_handler(CommandHandler("start", start))
