@@ -1,3 +1,14 @@
+# Щодо санкцій - раз на місяць (або після нових указів президента):
+# Скачати CSV з https://drs.nsdc.gov.ua/export/subjects
+# Перейменувати в sanctions_legal.csv та sanctions_individual.csv
+# scp C:\sanctions_update\sanctions_legal.csv root@94.130.111.231:/root/bankrupt_bot/
+# scp C:\sanctions_update\sanctions_individual.csv root@94.130.111.231:/root/bankrupt_bot/
+# Залити через PowerShell: scp sanctions_*.csv root@94.130.111.231:/root/bankrupt_bot/
+# Написати боту /update
+
+
+
+
 import logging
 import os
 import requests
