@@ -294,47 +294,63 @@ def check_user_subscriptions(chat_id, save_history=True):
     return new_items, "OK"
 
 def check_user_sanctions(chat_id, save_history=True):
-    """Перевіряє базу санкцій по підписках користувача."""
+    """Перевіряє санкції по підписках користувача."""
     if not os.path.exists(DB_FILE): return []
 
     new_sanctions = []
-    import re
-    
+
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
-        
-        user_codes = cursor.execute("SELECT firm_edrpou FROM subscriptions WHERE chat_id = ?", (chat_id,)).fetchall()
-        if not user_codes: return []
+
+        user_codes = cursor.execute(
+            "SELECT firm_edrpou FROM subscriptions WHERE chat_id = ?",
+            (chat_id,)
+        ).fetchall()
+
+        if not user_codes:
+            return []
 
         for (code,) in user_codes:
             if save_history:
-                seen = cursor.execute("SELECT 1 FROM sent_history_sanctions WHERE chat_id = ? AND firm_edrpou = ?", (chat_id, code)).fetchone()
-                if seen: continue 
-                
-            # Пошук у полях reg_id та tax_id
+                seen = cursor.execute(
+                    "SELECT 1 FROM sent_history_sanctions WHERE chat_id = ? AND firm_edrpou = ?",
+                    (chat_id, code)
+                ).fetchone()
+                if seen:
+                    continue
+
+            # Шукаємо код в полях reg_id та tax_id
             matches = cursor.execute("""
-                SELECT name, status, reg_id, tax_id 
-                FROM sanctions 
+                SELECT name, status, reg_id, tax_id
+                FROM sanctions
                 WHERE reg_id LIKE ? OR tax_id LIKE ?
-            """, (f"%{code}%", f"%{code}%")).fetchall()
-            
+            """, (f"%){code}[%", f"%){code}[%")).fetchall()
+
+            # Якщо не знайшло з дужкою — шукаємо просто по підстроці
+            if not matches:
+                matches = cursor.execute("""
+                    SELECT name, status, reg_id, tax_id
+                    FROM sanctions
+                    WHERE reg_id LIKE ? OR tax_id LIKE ?
+                """, (f"%{code}%", f"%{code}%")).fetchall()
+
             for name, status, reg_id, tax_id in matches:
-                # Об'єднуємо поля для перевірки і шукаємо код як ОДНЕ ціле число
-                reg_str = str(reg_id) + " " + str(tax_id)
-                if re.search(r'\b' + re.escape(code) + r'\b', reg_str):
-                    new_sanctions.append({
-                        "code": code,
-                        "name": name,
-                        "status": status
-                    })
-                    
-                    if save_history:
-                        cursor.execute("INSERT OR IGNORE INTO sent_history_sanctions (chat_id, firm_edrpou) VALUES (?, ?)", (chat_id, code))
-                    break # Переходимо до наступного коду
+                new_sanctions.append({
+                    "code": code,
+                    "name": name,
+                    "status": status
+                })
+
+                if save_history:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO sent_history_sanctions (chat_id, firm_edrpou) VALUES (?, ?)",
+                        (chat_id, code)
+                    )
+                break
 
         if save_history and new_sanctions:
             conn.commit()
-            
+
     return new_sanctions
 
 # --- УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ И ПОДПИСКАМИ (SQL) ---
@@ -614,16 +630,27 @@ async def find_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 res += "✅ В реєстрі банкрутств не знайдено.\n"
                 
             # 2. Пошук санкцій
-            s_rows = conn.execute("SELECT name, status, reg_id, tax_id FROM sanctions WHERE reg_id LIKE ? OR tax_id LIKE ?", (f"%{c}%", f"%{c}%")).fetchall()
+            s_rows = conn.execute("""
+                SELECT name, status, reg_id, tax_id 
+                FROM sanctions 
+                WHERE reg_id LIKE ? OR tax_id LIKE ?
+            """, (f"%){c}[%", f"%){c}[%")).fetchall()
+            
+            # Якщо не знайшло з дужкою — шукаємо просто по підстроці
+            if not s_rows:
+                s_rows = conn.execute("""
+                    SELECT name, status, reg_id, tax_id 
+                    FROM sanctions 
+                    WHERE reg_id LIKE ? OR tax_id LIKE ?
+                """, (f"%{c}%", f"%{c}%")).fetchall()
+
             s_found = False
             for name, status, reg_id, tax_id in s_rows:
-                reg_str = str(reg_id) + " " + str(tax_id)
-                if re.search(r'\b' + re.escape(c) + r'\b', reg_str):
-                    if not s_found:
-                        res += f"\n🛑 <b>САНКЦІЇ РНБО:</b>\n"
-                        s_found = True
-                    res += f"- {html.escape(name)} (Статус: {status})\n"
-                    
+                if not s_found:
+                    res += f"\n🛑 <b>САНКЦІЇ РНБО:</b>\n"
+                    s_found = True
+                res += f"- {html.escape(name)} (Статус: {status})\n"
+
             if not s_found:
                 res += "\n✅ В санкційних списках не знайдено.\n"
                 
