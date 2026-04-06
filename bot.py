@@ -347,7 +347,6 @@ def check_user_subscriptions(chat_id, save_history=True):
     return new_items, "OK"
 
 def check_user_sanctions(chat_id, save_history=True):
-    """Перевіряє санкції по підписках користувача."""
     if not os.path.exists(DB_FILE): return []
 
     new_sanctions = []
@@ -376,29 +375,31 @@ def check_user_sanctions(chat_id, save_history=True):
         if not codes_list:
             return []
 
-        # Один запит для всіх кодів
-        placeholders = ','.join('?' for _ in codes_list)
-        matches = cursor.execute(f"""
-            SELECT s.name, s.status, s.reg_id, s.tax_id
-            FROM sanctions s
-            WHERE {' OR '.join(['s.reg_id LIKE ? OR s.tax_id LIKE ?' for _ in codes_list])}
-        """, [val for code in codes_list for val in (f'%{code}%', f'%{code}%')]).fetchall()
+        # Розбиваємо на батчі по 100
+        batch_size = 100
+        for i in range(0, len(codes_list), batch_size):
+            batch = codes_list[i:i + batch_size]
+            
+            matches = cursor.execute(f"""
+                SELECT s.name, s.status, s.reg_id, s.tax_id
+                FROM sanctions s
+                WHERE {' OR '.join(['s.reg_id LIKE ? OR s.tax_id LIKE ?' for _ in batch])}
+            """, [val for code in batch for val in (f'%{code}%', f'%{code}%')]).fetchall()
 
-        # Визначаємо який код знайшовся
-        for name, status, reg_id, tax_id in matches:
-            for code in codes_list:
-                if code in (reg_id or '') or code in (tax_id or ''):
-                    new_sanctions.append({
-                        "code": code,
-                        "name": name,
-                        "status": status
-                    })
-                    if save_history:
-                        cursor.execute(
-                            "INSERT OR IGNORE INTO sent_history_sanctions (chat_id, firm_edrpou) VALUES (?, ?)",
-                            (chat_id, code)
-                        )
-                    break
+            for name, status, reg_id, tax_id in matches:
+                for code in batch:
+                    if code in (reg_id or '') or code in (tax_id or ''):
+                        new_sanctions.append({
+                            "code": code,
+                            "name": name,
+                            "status": status
+                        })
+                        if save_history:
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO sent_history_sanctions (chat_id, firm_edrpou) VALUES (?, ?)",
+                                (chat_id, code)
+                            )
+                        break
 
         if save_history and new_sanctions:
             conn.commit()
