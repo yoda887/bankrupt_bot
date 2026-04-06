@@ -655,6 +655,58 @@ async def manual_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"❌ Помилка оновлення.\nБанкрутства: {b_msg}\nСанкції: {s_msg}")
 
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        await update.message.reply_text("❌ Команда тільки для адміна.")
+        return
+
+    kyiv_tz = pytz.timezone('Europe/Kiev')
+    now = datetime.datetime.now(kyiv_tz)
+
+    with sqlite3.connect(DB_FILE) as conn:
+        total_users = conn.execute("SELECT COUNT(*) FROM users WHERE is_active = 1").fetchone()[0]
+        total_subs = conn.execute("SELECT COUNT(*) FROM subscriptions").fetchone()[0]
+        total_bankrupts = conn.execute("SELECT COUNT(*) FROM bankrupts").fetchone()[0]
+        total_sanctions = conn.execute("SELECT COUNT(*) FROM sanctions").fetchone()[0]
+        last_bankrupt_date = conn.execute(
+            "SELECT MAX(sent_at) FROM sent_history"
+        ).fetchone()[0]
+        last_sanction_date = conn.execute(
+            "SELECT MAX(sent_at) FROM sent_history_sanctions"
+        ).fetchone()[0]
+
+    sanctions_age = check_sanctions_file_age()
+
+    # Перевірка проблем
+    problems = []
+    if total_bankrupts == 0:
+        problems.append("⚠️ База банкрутств порожня")
+    if total_sanctions == 0:
+        problems.append("⚠️ База санкцій порожня")
+    if sanctions_age >= 30:
+        problems.append(f"⚠️ Файли санкцій не оновлювались {sanctions_age} днів")
+
+    if problems:
+        status_line = "🔴 <b>Є проблеми:</b>\n" + "\n".join(problems)
+    else:
+        status_line = "🟢 <b>Бот працює нормально</b>"
+
+    text = (
+        f"🤖 <b>Статус бота</b>\n"
+        f"🕐 {now.strftime('%d.%m.%Y %H:%M')} (Київ)\n\n"
+        f"{status_line}\n\n"
+        f"👥 Активних користувачів: <b>{total_users}</b>\n"
+        f"📋 Всього підписок: <b>{total_subs}</b>\n\n"
+        f"📦 Записів банкрутств в БД: <b>{total_bankrupts}</b>\n"
+        f"🛑 Записів санкцій в БД: <b>{total_sanctions}</b>\n\n"
+        f"📅 Останнє повідомлення про банкрутство: <b>{last_bankrupt_date or 'немає'}</b>\n"
+        f"📅 Останнє повідомлення про санкції: <b>{last_sanction_date or 'немає'}</b>\n\n"
+        f"⏳ Файли санкцій оновлені: <b>{sanctions_age} днів тому</b>"
+    )
+
+    await update.message.reply_text(text, parse_mode='HTML')
+
 # --- ФУНКЦИИ ДЛЯ CONVERSATION HANDLER (/find) ---
 
 async def find_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -781,6 +833,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("update", manual_update))
     app.add_handler(CommandHandler("clear_history", clear_history_command))
     app.add_handler(CommandHandler("import_txt", import_txt_command)) # <-- Новая команда
+    app.add_handler(CommandHandler("status", status_command))
     
     # 1. Диалог для поиска (/find)
     find_handler = ConversationHandler(
@@ -811,6 +864,8 @@ if __name__ == '__main__':
         fallbacks=[CommandHandler('cancel', cancel_operation)]
     )
     app.add_handler(del_handler)
+
+    
 
     print("Multi-user Bot Started...")
     app.run_polling()
