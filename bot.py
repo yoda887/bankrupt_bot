@@ -39,12 +39,19 @@ load_dotenv()
 TOKEN = os.getenv('BOT_TOKEN')
 
 # Настройка логирования (ФАЙЛ + КОНСОЛЬ)
+from logging.handlers import RotatingFileHandler
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
     handlers=[
-        logging.FileHandler("bot.log", encoding='utf-8'), # Логи в файл
-        logging.StreamHandler()          # Логи в консоль
+        RotatingFileHandler(
+            "bot.log",
+            maxBytes=5 * 1024 * 1024,  # 5 МБ максимум
+            backupCount=2,              # зберігати 2 старих файли
+            encoding='utf-8'
+        ),
+        logging.StreamHandler()
     ]
 )
 
