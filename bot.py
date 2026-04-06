@@ -356,43 +356,42 @@ def check_user_sanctions(chat_id, save_history=True):
         if not user_codes:
             return []
 
-        for (code,) in user_codes:
-            if save_history:
-                seen = cursor.execute(
-                    "SELECT 1 FROM sent_history_sanctions WHERE chat_id = ? AND firm_edrpou = ?",
-                    (chat_id, code)
-                ).fetchone()
-                if seen:
-                    continue
+        if save_history:
+            already_sent = set(row[0] for row in cursor.execute(
+                "SELECT firm_edrpou FROM sent_history_sanctions WHERE chat_id = ?",
+                (chat_id,)
+            ).fetchall())
+        else:
+            already_sent = set()
 
-            # Шукаємо код в полях reg_id та tax_id
-            matches = cursor.execute("""
-                SELECT name, status, reg_id, tax_id
-                FROM sanctions
-                WHERE reg_id LIKE ? OR tax_id LIKE ?
-            """, (f"%){code}[%", f"%){code}[%")).fetchall()
+        codes_list = [c[0] for c in user_codes if c[0] not in already_sent]
 
-            # Якщо не знайшло з дужкою — шукаємо просто по підстроці
-            if not matches:
-                matches = cursor.execute("""
-                    SELECT name, status, reg_id, tax_id
-                    FROM sanctions
-                    WHERE reg_id LIKE ? OR tax_id LIKE ?
-                """, (f"%{code}%", f"%{code}%")).fetchall()
+        if not codes_list:
+            return []
 
-            for name, status, reg_id, tax_id in matches:
-                new_sanctions.append({
-                    "code": code,
-                    "name": name,
-                    "status": status
-                })
+        # Один запит для всіх кодів
+        placeholders = ','.join('?' for _ in codes_list)
+        matches = cursor.execute(f"""
+            SELECT s.name, s.status, s.reg_id, s.tax_id
+            FROM sanctions s
+            WHERE {' OR '.join(['s.reg_id LIKE ? OR s.tax_id LIKE ?' for _ in codes_list])}
+        """, [val for code in codes_list for val in (f'%{code}%', f'%{code}%')]).fetchall()
 
-                if save_history:
-                    cursor.execute(
-                        "INSERT OR IGNORE INTO sent_history_sanctions (chat_id, firm_edrpou) VALUES (?, ?)",
-                        (chat_id, code)
-                    )
-                break
+        # Визначаємо який код знайшовся
+        for name, status, reg_id, tax_id in matches:
+            for code in codes_list:
+                if code in (reg_id or '') or code in (tax_id or ''):
+                    new_sanctions.append({
+                        "code": code,
+                        "name": name,
+                        "status": status
+                    })
+                    if save_history:
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO sent_history_sanctions (chat_id, firm_edrpou) VALUES (?, ?)",
+                            (chat_id, code)
+                        )
+                    break
 
         if save_history and new_sanctions:
             conn.commit()
